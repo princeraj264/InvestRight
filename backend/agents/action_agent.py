@@ -1,29 +1,29 @@
+import os
 import uuid
 from datetime import datetime
 from utils.logger import setup_logger
-from memory.memory_store import store_trade
+from memory.memory_store import store_trade, update_trade_result
 from safety.idempotency import generate_key, is_duplicate, record_key
+from safety.kill_switch import is_trading_halted
+from broker.broker_factory import get_broker
+from broker.order_manager import calculate_quantity, submit_order, poll_order_status
 
 logger = setup_logger(__name__)
 
 
 def execute(decision: dict, symbol: str) -> dict:
     """
-    Execute the trading decision (simulated for MVP).
+    Execute a trading decision end-to-end:
+    idempotency check → store trade → place order → poll fill.
 
     Args:
-        decision (dict): Output from risk_engine, containing:
-            - action: "BUY" | "SELL" | "WAIT"
-            - entry: float | None
-            - stop_loss: float | None
-            - target: float | None
-            - rr_ratio: float | None
-            - max_loss_pct: float | None
-            - rejection_reason: str | None
-        symbol (str): Stock symbol (e.g. "RELIANCE.NS")
+        decision (dict): Output from risk_engine
+        symbol   (str):  Stock symbol (e.g. "RELIANCE.NS")
 
     Returns:
-        dict: Execution result with trade_id if action was taken
+        dict with keys: executed, trade_id, order_id, broker_order_id,
+                        broker_mode, filled_price, filled_quantity,
+                        reason, trade_record
     """
     if not symbol:
         raise ValueError("[ACTION] symbol must be provided to execute()")
@@ -34,29 +34,22 @@ def execute(decision: dict, symbol: str) -> dict:
         if action == "WAIT":
             reason = decision.get("rejection_reason", "No trade executed")
             logger.info(f"[ACTION] {reason}")
-            return {
-                "executed": False,
-                "trade_id": None,
-                "reason": reason,
-            }
+            return _no_exec(reason)
 
         # ------------------------------------------------------------------
-        # Idempotency check — block duplicate signals within 15-min window
+        # Idempotency guard
         # ------------------------------------------------------------------
         idem_key = generate_key(symbol, action)
         if is_duplicate(idem_key):
             logger.warning(
                 f"[ACTION] Duplicate signal blocked: {symbol} {action} (key={idem_key})"
             )
-            return {
-                "executed": False,
-                "trade_id": None,
-                "reason": "Duplicate signal within 15-min window",
-            }
+            return _no_exec("Duplicate signal within 15-min window")
 
-        # For BUY or SELL, create a trade record
+        # ------------------------------------------------------------------
+        # Persist trade record
+        # ------------------------------------------------------------------
         trade_id = str(uuid.uuid4())
-
         trade_record = {
             "trade_id":               trade_id,
             "timestamp":              datetime.now().isoformat(),
@@ -72,40 +65,134 @@ def execute(decision: dict, symbol: str) -> dict:
             "features_vector":        decision.get("features_vector", {}),
         }
 
-        store_success = store_trade(trade_record)
+        if not store_trade(trade_record):
+            logger.error("[ACTION] Failed to store trade in DB")
+            return _no_exec("Failed to store trade in DB")
 
-        if store_success:
-            # Record idempotency key — log critical warning if this fails
-            if not record_key(idem_key, trade_id, symbol, action):
-                logger.critical(
-                    f"[ACTION] Idempotency key NOT recorded for trade {trade_id} — "
-                    f"next run may not detect duplicate"
-                )
+        # Record idempotency key immediately after successful store
+        if not record_key(idem_key, trade_id, symbol, action):
+            logger.critical(
+                f"[ACTION] Idempotency key NOT recorded for trade {trade_id} — "
+                f"next run may not detect duplicate"
+            )
 
-            logger.info(f"[ACTION] Trade executed and stored: {action} at {decision.get('entry')}")
-            logger.info(f"[ACTION] SL: {decision.get('stop_loss')}, Target: {decision.get('target')}")
-            logger.info(f"[ACTION] RR: {decision.get('rr_ratio'):.2f}, Max Loss: {decision.get('max_loss_pct'):.2f}%")
+        logger.info(
+            f"[ACTION] Trade stored: {action} {symbol} @ {decision.get('entry')} "
+            f"SL={decision.get('stop_loss')} T={decision.get('target')}"
+        )
 
+        # ------------------------------------------------------------------
+        # Quantity calculation
+        # ------------------------------------------------------------------
+        total_capital = float(os.getenv("TOTAL_CAPITAL", 0))
+        position_size = decision.get("position_size_fraction") or 0.0
+        entry_price   = decision.get("entry") or 0.0
+
+        quantity = calculate_quantity(position_size, entry_price, total_capital)
+        if quantity == 0:
+            reason = "Insufficient capital for minimum quantity"
+            logger.warning(f"[ACTION] {reason} for {symbol} (size={position_size}, entry={entry_price})")
+            update_trade_result(trade_id, "wrong")
+            return {**_no_exec(reason), "trade_id": trade_id, "trade_record": trade_record}
+
+        # ------------------------------------------------------------------
+        # Kill switch — re-check immediately before placing any order
+        # ------------------------------------------------------------------
+        if is_trading_halted():
+            logger.warning(f"[ACTION] Kill switch active mid-execution — cancelling trade {trade_id}")
+            update_trade_result(trade_id, "wrong")
+            return {**_no_exec("Kill switch activated before order placement"),
+                    "trade_id": trade_id, "trade_record": trade_record}
+
+        # ------------------------------------------------------------------
+        # Broker execution
+        # ------------------------------------------------------------------
+        broker = get_broker()
+        broker_mode = os.getenv("BROKER_MODE", "paper").lower()
+
+        order_params = {
+            "trade_id":   trade_id,
+            "symbol":     symbol,
+            "action":     action,
+            "quantity":   quantity,
+            "order_type": "MARKET",
+            "price":      None,
+            "entry":      decision.get("entry"),
+            "stop_loss":  decision.get("stop_loss"),
+            "target":     decision.get("target"),
+        }
+
+        order_result = submit_order(broker, order_params)
+
+        if order_result.get("status") == "FAILED":
+            logger.error(
+                f"[ACTION] Trade stored but order placement failed — "
+                f"marking trade as failed (trade_id={trade_id})"
+            )
+            update_trade_result(trade_id, "wrong")
             return {
-                "executed": True,
-                "trade_id": trade_id,
-                "reason": f"Trade executed: {action}",
-                "trade_record": trade_record,
+                "executed":        False,
+                "trade_id":        trade_id,
+                "order_id":        order_result.get("order_id"),
+                "broker_order_id": order_result.get("broker_order_id"),
+                "broker_mode":     broker_mode,
+                "filled_price":    None,
+                "filled_quantity": None,
+                "reason":          order_result.get("failure_reason", "Order placement failed"),
+                "trade_record":    trade_record,
             }
-        else:
-            logger.error("[ACTION] Failed to store trade in memory")
-            return {
-                "executed": False,
-                "trade_id": None,
-                "reason": "Failed to store trade in memory",
-            }
+
+        # ------------------------------------------------------------------
+        # Poll for fill (paper fills immediately; live polls up to 30 s)
+        # ------------------------------------------------------------------
+        broker_order_id = order_result.get("broker_order_id")
+        fill_result     = poll_order_status(broker, broker_order_id, trade_id)
+
+        executed = fill_result.get("status") in ("FILLED", "PARTIAL")
+        logger.info(
+            f"[ACTION] Order final status: {fill_result.get('status')} — "
+            f"filled_price={fill_result.get('filled_price')} "
+            f"filled_qty={fill_result.get('filled_quantity')}"
+        )
+
+        return {
+            "executed":        executed,
+            "trade_id":        trade_id,
+            "order_id":        order_result.get("order_id"),
+            "broker_order_id": broker_order_id,
+            "broker_mode":     broker_mode,
+            "filled_price":    fill_result.get("filled_price"),
+            "filled_quantity": fill_result.get("filled_quantity"),
+            "reason":          f"Trade executed: {action}" if executed else fill_result.get("failure_reason"),
+            "trade_record":    trade_record,
+        }
 
     except ValueError:
         raise
     except Exception as e:
-        logger.error(f"[ACTION] Error in action agent: {str(e)}")
+        logger.error(f"[ACTION] Error in action agent: {e}")
         return {
-            "executed": False,
-            "trade_id": None,
-            "reason": f"Action engine error: {str(e)}",
+            "executed":        False,
+            "trade_id":        None,
+            "order_id":        None,
+            "broker_order_id": None,
+            "broker_mode":     os.getenv("BROKER_MODE", "paper"),
+            "filled_price":    None,
+            "filled_quantity": None,
+            "reason":          f"Action engine error: {e}",
+            "trade_record":    {},
         }
+
+
+def _no_exec(reason: str) -> dict:
+    return {
+        "executed":        False,
+        "trade_id":        None,
+        "order_id":        None,
+        "broker_order_id": None,
+        "broker_mode":     os.getenv("BROKER_MODE", "paper"),
+        "filled_price":    None,
+        "filled_quantity": None,
+        "reason":          reason,
+        "trade_record":    {},
+    }

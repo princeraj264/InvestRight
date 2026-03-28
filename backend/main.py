@@ -248,6 +248,146 @@ def resume():
 
 
 # ---------------------------------------------------------------------------
+# Order endpoints
+# ---------------------------------------------------------------------------
+
+@app.route("/orders", methods=["GET"])
+@require_auth
+def list_orders():
+    """Return all orders, most recent first."""
+    try:
+        from db.connection import db_cursor
+        with db_cursor() as cur:
+            cur.execute(
+                """
+                SELECT order_id, trade_id, symbol, action, quantity, status,
+                       filled_price, filled_quantity, broker_mode,
+                       placed_at, filled_at, failure_reason
+                FROM orders
+                ORDER BY created_at DESC
+                """
+            )
+            rows = cur.fetchall()
+            cols = [d[0] for d in cur.description]
+
+        orders = []
+        for row in rows:
+            d = dict(zip(cols, row))
+            for k, v in d.items():
+                if hasattr(v, "isoformat"):
+                    d[k] = v.isoformat()
+                elif hasattr(v, "__float__"):
+                    try: d[k] = float(v)
+                    except Exception: pass
+            if d.get("trade_id"):
+                d["trade_id"] = str(d["trade_id"])
+            orders.append(d)
+
+        return jsonify({"orders": orders, "total": len(orders)})
+    except Exception as e:
+        logger.error(f"[API] /orders error: {e}")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+
+@app.route("/orders/<order_id>", methods=["GET"])
+@require_auth
+def get_order(order_id):
+    """Return a single order by order_id."""
+    try:
+        from db.connection import db_cursor
+        with db_cursor() as cur:
+            cur.execute("SELECT * FROM orders WHERE order_id = %s", (order_id,))
+            row = cur.fetchone()
+            if row is None:
+                return jsonify({"error": "Order not found"}), 404
+            cols = [d[0] for d in cur.description]
+            d = dict(zip(cols, row))
+
+        for k, v in d.items():
+            if hasattr(v, "isoformat"):
+                d[k] = v.isoformat()
+            elif hasattr(v, "__float__"):
+                try: d[k] = float(v)
+                except Exception: pass
+        if d.get("trade_id"):
+            d["trade_id"] = str(d["trade_id"])
+        return jsonify(d)
+    except Exception as e:
+        logger.error(f"[API] /orders/{order_id} error: {e}")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+
+@app.route("/orders/<order_id>/cancel", methods=["POST"])
+@require_auth
+def cancel_order(order_id):
+    """Cancel an open order."""
+    try:
+        from db.connection import db_cursor
+        with db_cursor() as cur:
+            cur.execute(
+                "SELECT status, broker_order_id, broker_mode FROM orders WHERE order_id = %s",
+                (order_id,)
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            return jsonify({"order_id": order_id, "cancelled": False,
+                            "message": "Order not found"}), 404
+
+        status, broker_order_id, broker_mode = row
+        if status == "FILLED":
+            return jsonify({"order_id": order_id, "cancelled": False,
+                            "message": "Order already filled — cannot cancel"}), 400
+        if status == "CANCELLED":
+            return jsonify({"order_id": order_id, "cancelled": True,
+                            "message": "Order already cancelled"})
+
+        from broker.broker_factory import get_broker
+        broker  = get_broker()
+        success = broker.cancel_order(broker_order_id)
+
+        if success:
+            return jsonify({"order_id": order_id, "cancelled": True,
+                            "message": "Order cancelled successfully"})
+        return jsonify({"order_id": order_id, "cancelled": False,
+                        "message": "Cancel request failed"}), 500
+
+    except Exception as e:
+        logger.error(f"[API] /orders/{order_id}/cancel error: {e}")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+
+@app.route("/broker/status", methods=["GET"])
+@require_auth
+def broker_status():
+    """Return current broker configuration and system state."""
+    broker_mode   = os.getenv("BROKER_MODE", "paper").lower()
+    total_capital = float(os.getenv("TOTAL_CAPITAL", 0))
+    halted        = is_trading_halted()
+
+    status = {
+        "broker_mode":   broker_mode,
+        "kill_switch":   halted,
+        "total_capital": total_capital,
+    }
+
+    if broker_mode == "live":
+        # Quick connectivity test
+        try:
+            from broker.kite_broker import _get_kite
+            kite = _get_kite()
+            kite.profile()
+            status["kite_connected"] = True
+        except Exception:
+            status["kite_connected"] = False
+    else:
+        status["kite_connected"] = False
+        status["paper_note"] = "Running in paper trading mode. No real orders placed."
+
+    return jsonify(status)
+
+
+# ---------------------------------------------------------------------------
 # Programmatic pipeline (used by scheduler.py)
 # ---------------------------------------------------------------------------
 

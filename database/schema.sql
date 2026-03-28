@@ -89,3 +89,36 @@ CREATE TABLE IF NOT EXISTS capital_limits (
     current_exposure_pct NUMERIC(5, 2) NOT NULL DEFAULT 0.00,
     updated_at           TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Order state machine
+CREATE TABLE IF NOT EXISTS orders (
+    order_id            VARCHAR(50) PRIMARY KEY,
+    trade_id            UUID REFERENCES trades(trade_id),
+    symbol              VARCHAR(20) NOT NULL,
+    action              VARCHAR(10) NOT NULL CHECK (action IN ('BUY', 'SELL')),
+    order_type          VARCHAR(20) NOT NULL DEFAULT 'MARKET',
+    quantity            INTEGER NOT NULL,
+    price               NUMERIC(12, 4),
+    trigger_price       NUMERIC(12, 4),
+    status              VARCHAR(20) NOT NULL DEFAULT 'PENDING'
+                        CHECK (status IN (
+                            'PENDING', 'PLACED', 'FILLED', 'PARTIAL',
+                            'CANCELLED', 'FAILED', 'REJECTED'
+                        )),
+    filled_quantity     INTEGER DEFAULT 0,
+    filled_price        NUMERIC(12, 4),
+    broker_order_id     VARCHAR(100),
+    broker_mode         VARCHAR(10) NOT NULL DEFAULT 'paper'
+                        CHECK (broker_mode IN ('paper', 'live')),
+    failure_reason      TEXT,
+    retry_count         INTEGER DEFAULT 0,
+    placed_at           TIMESTAMPTZ,
+    filled_at           TIMESTAMPTZ,
+    cancelled_at        TIMESTAMPTZ,
+    created_at          TIMESTAMPTZ DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_orders_trade_id ON orders(trade_id);
+CREATE INDEX IF NOT EXISTS idx_orders_status   ON orders(status);
+CREATE INDEX IF NOT EXISTS idx_orders_symbol   ON orders(symbol);

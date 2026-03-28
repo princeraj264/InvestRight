@@ -13,10 +13,18 @@ JWT_EXPIRY_HOURS = int(os.getenv('JWT_EXPIRY_HOURS', 24))
 API_KEY = os.getenv('API_KEY')
 DEFAULT_CAPITAL_LIMIT = float(os.getenv('DEFAULT_CAPITAL_LIMIT', 10.0))
 
+BROKER_MODE    = os.getenv('BROKER_MODE', 'paper')
+TOTAL_CAPITAL  = float(os.getenv('TOTAL_CAPITAL', 0))
+KITE_API_KEY   = os.getenv('KITE_API_KEY')
+KITE_ACCESS_TOKEN = os.getenv('KITE_ACCESS_TOKEN')
+KITE_PRODUCT   = os.getenv('KITE_PRODUCT', 'MIS')
+
 if not JWT_SECRET:
     raise EnvironmentError("JWT_SECRET environment variable is not set.")
 if not API_KEY:
     raise EnvironmentError("API_KEY environment variable is not set.")
+if not TOTAL_CAPITAL:
+    raise EnvironmentError("TOTAL_CAPITAL environment variable is not set or is zero.")
 
 class Config:
     STOCK_API_KEY = os.getenv('API_KEY_STOCK')

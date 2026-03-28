@@ -1,0 +1,200 @@
+import os
+import uuid
+from datetime import datetime, timezone
+from typing import Optional
+
+import yfinance as yf
+
+from broker.base import BaseBroker
+from db.connection import db_cursor
+from utils.logger import setup_logger
+
+logger = setup_logger(__name__)
+
+_BROKER_MODE = "paper"
+
+
+class PaperBroker(BaseBroker):
+    """
+    Simulated broker — no real money, no external API calls.
+    Orders fill immediately at LTP (or decision price if LTP unavailable).
+    """
+
+    def place_order(self, order_params: dict) -> dict:
+        action   = order_params.get("action")
+        quantity = order_params.get("quantity", 0)
+        symbol   = order_params.get("symbol", "")
+        trade_id = order_params.get("trade_id")
+
+        if quantity <= 0:
+            return self._failed("Quantity must be greater than zero", order_params)
+
+        if action not in ("BUY", "SELL"):
+            return self._failed("Invalid action", order_params)
+
+        order_id = str(uuid.uuid4())
+
+        # Try to get LTP; fall back to decision price
+        ltp = self.get_ltp(symbol)
+        if ltp is None:
+            ltp = order_params.get("price") or order_params.get("entry")
+            logger.warning(
+                f"[PAPER] LTP unavailable for {symbol} — filling at decision price {ltp}"
+            )
+
+        now = datetime.now(timezone.utc)
+        try:
+            with db_cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO orders (
+                        order_id, trade_id, symbol, action, order_type,
+                        quantity, price, status, filled_quantity, filled_price,
+                        broker_order_id, broker_mode, placed_at, filled_at, updated_at
+                    ) VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s, %s, 'FILLED', %s, %s,
+                        %s, 'paper', %s, %s, %s
+                    )
+                    """,
+                    (
+                        order_id, trade_id, symbol, action,
+                        order_params.get("order_type", "MARKET"),
+                        quantity, ltp, quantity, ltp,
+                        order_id, now, now, now,
+                    ),
+                )
+            logger.info(
+                f"[PAPER] Order FILLED: {action} {quantity}x {symbol} @ {ltp:.2f} "
+                f"(order_id={order_id})"
+            )
+            return {
+                "order_id":        order_id,
+                "broker_order_id": order_id,
+                "status":          "FILLED",
+                "filled_price":    ltp,
+                "filled_quantity": quantity,
+                "failure_reason":  None,
+            }
+        except Exception as e:
+            logger.error(f"[PAPER] Failed to insert order row: {e}")
+            return self._failed(f"DB error: {e}", order_params, order_id=order_id)
+
+    def get_order_status(self, broker_order_id: str) -> dict:
+        try:
+            with db_cursor() as cur:
+                cur.execute(
+                    "SELECT status, filled_quantity, filled_price FROM orders "
+                    "WHERE order_id = %s",
+                    (broker_order_id,),
+                )
+                row = cur.fetchone()
+            if row is None:
+                return {
+                    "broker_order_id": broker_order_id,
+                    "status":          "FAILED",
+                    "filled_quantity": 0,
+                    "filled_price":    None,
+                    "failure_reason":  "Order not found",
+                }
+            return {
+                "broker_order_id": broker_order_id,
+                "status":          row[0],
+                "filled_quantity": row[1] or 0,
+                "filled_price":    float(row[2]) if row[2] else None,
+                "failure_reason":  None,
+            }
+        except Exception as e:
+            logger.error(f"[PAPER] get_order_status failed: {e}")
+            return {
+                "broker_order_id": broker_order_id,
+                "status":          "FAILED",
+                "filled_quantity": 0,
+                "filled_price":    None,
+                "failure_reason":  str(e),
+            }
+
+    def cancel_order(self, broker_order_id: str) -> bool:
+        try:
+            with db_cursor() as cur:
+                cur.execute(
+                    "UPDATE orders SET status='CANCELLED', cancelled_at=%s, updated_at=%s "
+                    "WHERE order_id=%s",
+                    (datetime.now(timezone.utc), datetime.now(timezone.utc), broker_order_id),
+                )
+            return True
+        except Exception as e:
+            logger.error(f"[PAPER] cancel_order failed: {e}")
+            return False
+
+    def get_ltp(self, symbol: str) -> Optional[float]:
+        # Check Redis cache first (60s TTL for LTP)
+        try:
+            import redis as _redis
+            import os
+            r = _redis.from_url(
+                os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+                decode_responses=True,
+                socket_connect_timeout=1,
+            )
+            cached = r.get(f"ltp:{symbol}")
+            if cached is not None:
+                return float(cached)
+        except Exception:
+            pass  # Redis unavailable — proceed to yfinance
+
+        try:
+            ticker = yf.Ticker(symbol)
+            df = ticker.history(period="1d", interval="1m")
+            if df.empty:
+                return None
+            ltp = float(df["Close"].iloc[-1])
+
+            # Cache for 60 seconds
+            try:
+                r.setex(f"ltp:{symbol}", 60, str(ltp))
+            except Exception:
+                pass
+
+            return ltp
+        except Exception as e:
+            logger.warning(f"[PAPER] LTP fetch failed for {symbol}: {e}")
+            return None
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _failed(self, reason: str, order_params: dict, order_id: str = None) -> dict:
+        oid = order_id or str(uuid.uuid4())
+        try:
+            with db_cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO orders (
+                        order_id, trade_id, symbol, action, order_type,
+                        quantity, broker_mode, status, failure_reason, updated_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, 'paper', 'FAILED', %s, NOW())
+                    ON CONFLICT (order_id) DO NOTHING
+                    """,
+                    (
+                        oid,
+                        order_params.get("trade_id"),
+                        order_params.get("symbol", ""),
+                        order_params.get("action", ""),
+                        order_params.get("order_type", "MARKET"),
+                        max(order_params.get("quantity", 0), 0),
+                        reason,
+                    ),
+                )
+        except Exception as db_err:
+            logger.error(f"[PAPER] Could not persist FAILED order row: {db_err}")
+
+        return {
+            "order_id":        oid,
+            "broker_order_id": oid,
+            "status":          "FAILED",
+            "filled_price":    None,
+            "filled_quantity": 0,
+            "failure_reason":  reason,
+        }
