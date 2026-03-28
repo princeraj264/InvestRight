@@ -1,128 +1,134 @@
 import json
-import os
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Optional
 from utils.logger import setup_logger
+from db.connection import db_cursor
 
 logger = setup_logger(__name__)
 
-# Memory file path
-MEMORY_FILE = os.path.join(os.path.dirname(__file__), "memory.json")
-
-def _load_memory() -> dict:
-    """Load memory from JSON file."""
-    if not os.path.exists(MEMORY_FILE):
-        return {"trades": {}}
-    
-    try:
-        with open(MEMORY_FILE, 'r') as f:
-            return json.load(f)
-    except Exception as e:
-        logger.error(f"[MEMORY_STORE] Failed to load memory: {str(e)}")
-        return {"trades": {}}
 
 def _save_memory(memory_data: dict):
-    """Save memory to JSON file."""
-    try:
-        with open(MEMORY_FILE, 'w') as f:
-            json.dump(memory_data, f, indent=2)
-    except Exception as e:
-        logger.error(f"[MEMORY_STORE] Failed to save memory: {str(e)}")
+    """Deprecated shim — memory is now in PostgreSQL. No-op."""
+    logger.warning("[MEMORY_STORE] _save_memory() is deprecated; data is persisted via PostgreSQL.")
+
 
 def store_trade(trade_record: dict) -> bool:
-    """
-    Store a trade record in memory.
-    
-    Args:
-        trade_record (dict): Trade data to store
-        
-    Returns:
-        bool: True if stored successfully, False otherwise
-    """
+    trade_id = trade_record.get("trade_id")
+    if not trade_id:
+        logger.error("[MEMORY_STORE] Trade record missing trade_id")
+        return False
+
+    features = trade_record.get("features_vector") or {}
+
     try:
-        memory = _load_memory()
-        
-        # Ensure trade_id exists
-        trade_id = trade_record.get("trade_id")
-        if not trade_id:
-            logger.error("[MEMORY_STORE] Trade record missing trade_id")
-            return False
-        
-        # Store the trade
-        memory["trades"][trade_id] = trade_record
-        
-        # Save back to file
-        _save_memory(memory)
-        
+        with db_cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO trades (
+                    trade_id, timestamp, symbol, action,
+                    entry, stop_loss, target, rr_ratio,
+                    max_loss_pct, position_size_fraction,
+                    features_vector, result, rejection_reason
+                ) VALUES (
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s,
+                    %s, %s, %s
+                )
+                """,
+                (
+                    trade_id,
+                    trade_record.get("timestamp"),
+                    trade_record.get("symbol"),
+                    trade_record.get("action"),
+                    trade_record.get("entry"),
+                    trade_record.get("stop_loss"),
+                    trade_record.get("target"),
+                    trade_record.get("rr_ratio"),
+                    trade_record.get("max_loss_pct"),
+                    trade_record.get("position_size_fraction"),
+                    json.dumps(features),
+                    trade_record.get("result"),
+                    trade_record.get("rejection_reason"),
+                ),
+            )
         logger.info(f"[MEMORY_STORE] Trade stored: {trade_id}")
         return True
-        
     except Exception as e:
-        logger.error(f"[MEMORY_STORE] Error storing trade: {str(e)}")
+        # UniqueViolation and all other DB errors
+        logger.error(f"[MEMORY_STORE] Error storing trade {trade_id}: {e}")
         return False
 
-def get_trade(trade_id: str) -> dict:
-    """
-    Retrieve a trade from memory by ID.
-    
-    Args:
-        trade_id (str): ID of the trade to retrieve
-        
-    Returns:
-        dict: Trade data or None if not found
-    """
+
+def get_trade(trade_id: str) -> Optional[dict]:
     try:
-        memory = _load_memory()
-        return memory.get("trades", {}).get(trade_id)
+        with db_cursor() as cur:
+            cur.execute(
+                "SELECT * FROM trades WHERE trade_id = %s",
+                (trade_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            cols = [desc[0] for desc in cur.description]
+            return _row_to_dict(cols, row)
     except Exception as e:
-        logger.error(f"[MEMORY_STORE] Error retrieving trade {trade_id}: {str(e)}")
+        logger.error(f"[MEMORY_STORE] Error retrieving trade {trade_id}: {e}")
         return None
 
+
 def update_trade_result(trade_id: str, result: str) -> bool:
-    """
-    Update the result of a trade in memory.
-    
-    Args:
-        trade_id (str): ID of the trade to update
-        result (str): Result ("correct" or "wrong")
-        
-    Returns:
-        bool: True if updated successfully, False otherwise
-    """
+    if result not in ("correct", "wrong"):
+        logger.error(f"[MEMORY_STORE] Invalid result value: {result}")
+        return False
     try:
-        if result not in ["correct", "wrong"]:
-            logger.error(f"[MEMORY_STORE] Invalid result: {result}")
-            return False
-        
-        memory = _load_memory()
-        
-        if trade_id not in memory.get("trades", {}):
-            logger.error(f"[MEMORY_STORE] Trade not found: {trade_id}")
-            return False
-        
-        # Update the trade result
-        memory["trades"][trade_id]["result"] = result
-        memory["trades"][trade_id]["updated_at"] = datetime.now().isoformat()
-        
-        # Save back to file
-        _save_memory(memory)
-        
+        with db_cursor() as cur:
+            cur.execute(
+                """
+                UPDATE trades
+                SET result = %s, updated_at = %s
+                WHERE trade_id = %s
+                """,
+                (result, datetime.now(timezone.utc), trade_id),
+            )
+            if cur.rowcount == 0:
+                logger.error(f"[MEMORY_STORE] Trade not found for update: {trade_id}")
+                return False
         logger.info(f"[MEMORY_STORE] Trade {trade_id} result updated to: {result}")
         return True
-        
     except Exception as e:
-        logger.error(f"[MEMORY_STORE] Error updating trade result: {str(e)}")
+        logger.error(f"[MEMORY_STORE] Error updating trade result {trade_id}: {e}")
         return False
 
+
 def get_all_trades() -> dict:
-    """
-    Get all trades from memory.
-    
-    Returns:
-        dict: All trades keyed by trade_id
-    """
     try:
-        memory = _load_memory()
-        return memory.get("trades", {})
+        with db_cursor() as cur:
+            cur.execute("SELECT * FROM trades")
+            rows = cur.fetchall()
+            if not rows:
+                return {}
+            cols = [desc[0] for desc in cur.description]
+            return {
+                str(row[cols.index("trade_id")]): _row_to_dict(cols, row)
+                for row in rows
+            }
     except Exception as e:
-        logger.error(f"[MEMORY_STORE] Error getting all trades: {str(e)}")
+        logger.error(f"[MEMORY_STORE] Error getting all trades: {e}")
         return {}
+
+
+def _row_to_dict(cols: list, row: tuple) -> dict:
+    d = dict(zip(cols, row))
+    # Normalise types for downstream consumers
+    for k, v in d.items():
+        if hasattr(v, "isoformat"):          # datetime → ISO string
+            d[k] = v.isoformat()
+        elif hasattr(v, "__float__"):        # Decimal → float
+            try:
+                d[k] = float(v)
+            except Exception:
+                pass
+    if "trade_id" in d:
+        d["trade_id"] = str(d["trade_id"])
+    return d

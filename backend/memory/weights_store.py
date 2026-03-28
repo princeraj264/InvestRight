@@ -1,8 +1,5 @@
 """
-Fix 10: Weight persistence and gradient-ascent learning from trade history.
-
-Weights are stored in memory/weights.json.  On startup decision_agent loads
-them, falling back to DEFAULT_WEIGHTS when no learned weights exist yet.
+Weight persistence via PostgreSQL (append-only — full weight history is preserved).
 
 update_weights_from_trades() runs one pass of stochastic gradient ascent on
 the binary cross-entropy loss over all completed (correct/wrong) trades whose
@@ -15,14 +12,11 @@ Outcome encoding (maps to "did price go up?"):
     SELL + wrong   → y = 1
 """
 
-import json
 import math
-import os
 from utils.logger import setup_logger
+from db.connection import db_cursor
 
 logger = setup_logger(__name__)
-
-WEIGHTS_FILE = os.path.join(os.path.dirname(__file__), "weights.json")
 
 # Canonical defaults — must stay in sync with decision_agent.DEFAULT_WEIGHTS
 DEFAULT_WEIGHTS = {
@@ -37,26 +31,64 @@ DEFAULT_WEIGHTS = {
 
 
 def load_weights() -> dict:
-    """Return persisted weights, or defaults if no file exists yet."""
-    if not os.path.exists(WEIGHTS_FILE):
-        return DEFAULT_WEIGHTS.copy()
+    """Return the most recently saved weights, or defaults if table is empty."""
     try:
-        with open(WEIGHTS_FILE, "r") as f:
-            saved = json.load(f)
-        # Fill in any keys missing from old saves
+        with db_cursor() as cur:
+            cur.execute(
+                """
+                SELECT w_bias, w_trend, w_sentiment, w_pattern,
+                       w_volatility, w_sr_signal, w_volume
+                FROM weights
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            logger.info("[WEIGHTS] No saved weights found — using defaults")
+            return DEFAULT_WEIGHTS.copy()
+
+        saved = {
+            "w_bias":       float(row[0]),
+            "w_trend":      float(row[1]),
+            "w_sentiment":  float(row[2]),
+            "w_pattern":    float(row[3]),
+            "w_volatility": float(row[4]),
+            "w_sr_signal":  float(row[5]),
+            "w_volume":     float(row[6]),
+        }
+        # Fill any missing keys from defaults (future-proofing)
         weights = DEFAULT_WEIGHTS.copy()
         weights.update(saved)
         return weights
+
     except Exception as e:
         logger.error(f"[WEIGHTS] Failed to load weights: {e}")
         return DEFAULT_WEIGHTS.copy()
 
 
 def save_weights(weights: dict):
-    """Persist current weights to disk."""
+    """Append a new row to the weights table (history preserved)."""
     try:
-        with open(WEIGHTS_FILE, "w") as f:
-            json.dump(weights, f, indent=2)
+        with db_cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO weights
+                    (w_bias, w_trend, w_sentiment, w_pattern,
+                     w_volatility, w_sr_signal, w_volume)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    weights.get("w_bias",       DEFAULT_WEIGHTS["w_bias"]),
+                    weights.get("w_trend",      DEFAULT_WEIGHTS["w_trend"]),
+                    weights.get("w_sentiment",  DEFAULT_WEIGHTS["w_sentiment"]),
+                    weights.get("w_pattern",    DEFAULT_WEIGHTS["w_pattern"]),
+                    weights.get("w_volatility", DEFAULT_WEIGHTS["w_volatility"]),
+                    weights.get("w_sr_signal",  DEFAULT_WEIGHTS["w_sr_signal"]),
+                    weights.get("w_volume",     DEFAULT_WEIGHTS["w_volume"]),
+                ),
+            )
         logger.info(f"[WEIGHTS] Saved: {weights}")
     except Exception as e:
         logger.error(f"[WEIGHTS] Failed to save weights: {e}")
@@ -76,7 +108,7 @@ def update_weights_from_trades(trades: dict, learning_rate: float = 0.01) -> dic
         result          : "correct" | "wrong"
         features_vector : dict (stored by action_agent at decision time)
 
-    Returns updated weights dict (also persisted to disk).
+    Returns updated weights dict (also persisted to DB).
     """
     weights = load_weights()
 
@@ -92,7 +124,7 @@ def update_weights_from_trades(trades: dict, learning_rate: float = 0.01) -> dic
         return weights
 
     for trade in eligible:
-        fv    = trade["features_vector"]
+        fv     = trade["features_vector"]
         action = trade["action"]
         result = trade["result"]
 
@@ -100,7 +132,6 @@ def update_weights_from_trades(trades: dict, learning_rate: float = 0.01) -> dic
         y = 1.0 if (action == "BUY"  and result == "correct") or \
                    (action == "SELL" and result == "wrong")  else 0.0
 
-        # Feature vector aligned to weight keys
         x = {
             "w_bias":       1.0,
             "w_trend":      fv.get("trend",              0.0),

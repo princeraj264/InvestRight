@@ -6,3 +6,5 @@ pandas
 numpy
 schedule
 feedparser
+psycopg2-binary
+redis

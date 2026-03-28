@@ -3,6 +3,7 @@ import pandas as pd
 import requests
 import time
 from utils.logger import setup_logger
+from cache.redis_client import get_ohlcv, set_ohlcv
 
 logger = setup_logger(__name__)
 
@@ -66,13 +67,18 @@ def fetch_stock_data_reliable(symbol: str, interval="1h", period="1mo", max_retr
     Returns:
         pd.DataFrame: Stock data or None if all attempts fail
     """
+    cached = get_ohlcv(symbol)
+    if cached is not None and not cached.empty:
+        return cached
+
     for attempt in range(max_retries):
         data = fetch_stock_data(symbol, interval, period)
         if data is not None and not data.empty:
+            set_ohlcv(symbol, data)
             return data
         logger.warning(f"[STOCK_SERVICE] Attempt {attempt + 1}/{max_retries} failed for {symbol}")
         if attempt < max_retries - 1:
             time.sleep(1)  # Brief pause before retry
-    
+
     logger.error(f"[STOCK_SERVICE] All {max_retries} attempts failed for {symbol}")
     return None
