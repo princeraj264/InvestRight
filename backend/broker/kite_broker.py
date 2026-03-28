@@ -25,8 +25,11 @@ logger = setup_logger(__name__)
 
 def _get_kite():
     """
-    Build a fresh KiteConnect instance on every call so the access token
-    is always read from the environment (tokens rotate daily).
+    Build a fresh KiteConnect instance on every call.
+
+    Token priority:
+      1. Active token from kite_tokens DB table (managed by /broker/kite/token endpoint)
+      2. KITE_ACCESS_TOKEN environment variable (legacy / manual set)
     """
     try:
         from kiteconnect import KiteConnect
@@ -35,12 +38,26 @@ def _get_kite():
             "kiteconnect package not installed. Run: pip install kiteconnect"
         )
 
-    api_key      = os.getenv("KITE_API_KEY")
-    access_token = os.getenv("KITE_ACCESS_TOKEN")
+    api_key = os.getenv("KITE_API_KEY")
+    if not api_key:
+        raise EnvironmentError("KITE_API_KEY must be set for live trading.")
 
-    if not api_key or not access_token:
+    # Prefer DB-stored token (survives restarts, updated via API)
+    access_token = None
+    try:
+        from auth.kite_token_refresh import get_active_token
+        access_token = get_active_token()
+    except Exception:
+        pass
+
+    # Fall back to env var
+    if not access_token:
+        access_token = os.getenv("KITE_ACCESS_TOKEN")
+
+    if not access_token:
         raise EnvironmentError(
-            "KITE_API_KEY and KITE_ACCESS_TOKEN must be set for live trading."
+            "No valid Kite access token found. "
+            "POST /broker/kite/token to store one or set KITE_ACCESS_TOKEN."
         )
 
     kite = KiteConnect(api_key=api_key)

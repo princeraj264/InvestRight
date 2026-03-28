@@ -1,35 +1,50 @@
 #!/bin/bash
+# InvestRight — local development startup script
+# For production use docker-compose.yml instead.
 
-# Script to start the AI multi-agent system
+set -e
 
-echo "Starting AI Multi-Agent System..."
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BACKEND_DIR="$ROOT_DIR/backend"
+FRONTEND_DIR="$ROOT_DIR/frontend"
+VENV_DIR="$ROOT_DIR/.venv"
 
-# Check if virtual environment exists, if not create and activate it
-if [ ! -d ".venv" ]; then
-    python3 -m venv .venv
-    echo "Virtual environment created."
+echo "=== InvestRight Startup ==="
+
+# 1. Virtual environment
+if [ ! -d "$VENV_DIR" ]; then
+    echo "[setup] Creating virtual environment..."
+    python3 -m venv "$VENV_DIR"
 fi
+source "$VENV_DIR/bin/activate"
 
-source .venv/bin/activate
+# 2. Install / update dependencies
+echo "[setup] Installing dependencies..."
+pip install -q -r "$BACKEND_DIR/requirements.txt"
 
-# Install dependencies
-pip install -r backend/requirements.txt
+# 3. Initialise database (idempotent — safe to run every time)
+echo "[setup] Initialising database..."
+cd "$BACKEND_DIR"
+python init_db.py && echo "[setup] Database ready."
 
-# Start the backend (Flask API)
-echo "Starting backend API..."
-cd backend
+# 4. Start backend
+echo "[backend] Starting Flask API on port 5001..."
 python main.py &
+BACKEND_PID=$!
 
-# Start the frontend (simple HTTP server for static files)
-echo "Starting frontend..."
-cd ../frontend
+# 5. Start frontend static server
+echo "[frontend] Serving SPA on http://localhost:8080"
+cd "$FRONTEND_DIR"
 python -m http.server 8080 &
+FRONTEND_PID=$!
 
-echo "System started. Backend running on port 5001, Frontend on port 8080."
-echo "Press CTRL+C to stop the system."
+echo ""
+echo "  Backend  → http://localhost:5001"
+echo "  Frontend → http://localhost:8080"
+echo ""
+echo "Press Ctrl+C to stop all services."
 
-# Wait for any process to exit
-wait -n
+# Cleanup on exit
+trap "echo ''; echo 'Shutting down...'; kill $BACKEND_PID $FRONTEND_PID 2>/dev/null; exit 0" INT TERM
 
-# Exit with status of process that exited first
-exit $?
+wait

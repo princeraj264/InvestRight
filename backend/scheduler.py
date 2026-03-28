@@ -66,6 +66,39 @@ def snapshot_job():
     logger.info(f"[SCHEDULER] Snapshot {'saved' if ok else 'FAILED'}")
 
 
+def log_retention_job():
+    """Delete aged rows from ephemeral log tables (runs at 02:00 IST)."""
+    logger.info("[SCHEDULER] Running log retention")
+    try:
+        from maintenance.log_retention import run_retention
+        result = run_retention()
+        logger.info(
+            f"[SCHEDULER] Log retention done — "
+            f"audit_log={result['audit_log_deleted']} "
+            f"pipeline_metrics={result['pipeline_metrics_deleted']} "
+            f"llm_calls={result['llm_calls_deleted']} "
+            f"rate_limit={result['rate_limit_deleted']}"
+        )
+    except Exception as e:
+        logger.error(f"[SCHEDULER] log_retention_job error: {e}")
+
+
+def db_cleanup_job():
+    """ANALYZE tables and reset stale backtest runs (runs at 03:00 IST)."""
+    logger.info("[SCHEDULER] Running DB cleanup")
+    try:
+        from maintenance.db_cleanup import run_all
+        result = run_all()
+        logger.info(
+            f"[SCHEDULER] DB cleanup done — "
+            f"vacuum_ok={result['vacuum_ok']} "
+            f"stale_runs_reset={result['stale_runs_reset']} "
+            f"idem_keys_purged={result['idempotency_keys_purged']}"
+        )
+    except Exception as e:
+        logger.error(f"[SCHEDULER] db_cleanup_job error: {e}")
+
+
 def run_scheduler():
     """Set up and run the scheduler."""
     symbols = getattr(Config, 'SYMBOLS', ['RELIANCE.NS'])
@@ -84,6 +117,15 @@ def run_scheduler():
     # Daily P&L snapshot at market close (15:30 IST)
     schedule.every().day.at("15:30").do(snapshot_job)
     logger.info("[SCHEDULER] Scheduled daily P&L snapshot at 15:30 IST")
+
+    # Maintenance jobs (IST times as UTC offset: IST = UTC+5:30)
+    # 02:00 IST = 20:30 UTC previous day — use UTC times for schedule
+    schedule.every().day.at("20:30").do(log_retention_job)
+    logger.info("[SCHEDULER] Scheduled log retention at 02:00 IST (20:30 UTC)")
+
+    # 03:00 IST = 21:30 UTC previous day
+    schedule.every().day.at("21:30").do(db_cleanup_job)
+    logger.info("[SCHEDULER] Scheduled DB cleanup at 03:00 IST (21:30 UTC)")
 
     # Run once immediately at startup
     degradation_check_job()

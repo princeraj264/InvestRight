@@ -279,6 +279,36 @@ CREATE TABLE IF NOT EXISTS model_performance (
 );
 
 -- LLM call log — track every Anthropic API call
+-- Missing indexes from previous batches
+CREATE INDEX IF NOT EXISTS idx_trades_symbol     ON trades(symbol);
+CREATE INDEX IF NOT EXISTS idx_trades_result     ON trades(result);
+CREATE INDEX IF NOT EXISTS idx_trades_timestamp  ON trades(timestamp);
+CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_log_severity ON audit_log(severity);
+
+-- Rate limit tracking
+CREATE TABLE IF NOT EXISTS rate_limit_log (
+    id            SERIAL PRIMARY KEY,
+    endpoint      VARCHAR(100) NOT NULL,
+    client_id     VARCHAR(100) NOT NULL,
+    request_count INTEGER NOT NULL DEFAULT 1,
+    window_start  TIMESTAMPTZ NOT NULL,
+    created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_rate_limit_client ON rate_limit_log(client_id, window_start);
+
+-- Kite token management
+CREATE TABLE IF NOT EXISTS kite_tokens (
+    id            SERIAL PRIMARY KEY,
+    access_token  TEXT NOT NULL,
+    request_token TEXT,
+    valid_from    TIMESTAMPTZ NOT NULL,
+    valid_until   TIMESTAMPTZ NOT NULL,
+    is_active     BOOLEAN DEFAULT TRUE,
+    created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS llm_calls (
     call_id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     trace_id          UUID,

@@ -6,6 +6,7 @@ import threading
 from dotenv import load_dotenv
 load_dotenv()  # Must run before any module that reads env vars at import time
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from observability.trace import TraceContext, generate_trace_id
 from observability.audit_log import (
     log_event, log_pipeline_start, log_pipeline_end,
@@ -22,6 +23,7 @@ from auth.jwt_handler import generate_token
 from auth.middleware import require_auth
 from safety.kill_switch import is_trading_halted, activate_kill_switch, deactivate_kill_switch
 from utils.logger import setup_logger
+from utils.rate_limiter import check_rate_limit
 
 logger = setup_logger(__name__)
 
@@ -32,6 +34,30 @@ if not _API_KEY:
 _JWT_EXPIRY_HOURS = int(os.getenv("JWT_EXPIRY_HOURS", 24))
 
 app = Flask(__name__)
+
+# CORS — allow origins from CORS_ORIGINS env var (comma-separated)
+_cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:8080")
+CORS(app, origins=[o.strip() for o in _cors_origins.split(",") if o.strip()])
+
+
+def _rate_limit_check(endpoint: str):
+    """
+    Apply rate limiting for the given endpoint.
+    Returns a 429 Response if the limit is exceeded, else None.
+    Client identity is the remote IP (or X-Forwarded-For).
+    """
+    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown")
+    # Use first IP if there are multiple (proxy chain)
+    client_id = client_ip.split(",")[0].strip()
+    allowed, headers = check_rate_limit(client_id, endpoint)
+    if not allowed:
+        resp = jsonify({"error": "Too Many Requests",
+                        "message": f"Rate limit exceeded for {endpoint}"})
+        resp.status_code = 429
+        for k, v in headers.items():
+            resp.headers[k] = v
+        return resp
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +147,18 @@ def health():
         status["model_health"] = {"is_healthy": True, "accuracy": None,
                                   "brier_score": None, "sample_size": 0}
 
+    # Kite token status (only in live mode)
+    if os.getenv("BROKER_MODE", "paper").lower() == "live":
+        try:
+            from auth.kite_token_refresh import is_token_valid, get_token_expiry
+            expiry = get_token_expiry()
+            status["kite_token"] = {
+                "valid":       is_token_valid(),
+                "valid_until": expiry.isoformat() if expiry else None,
+            }
+        except Exception:
+            status["kite_token"] = {"valid": False, "valid_until": None}
+
     status["status"] = overall
     return jsonify(status)
 
@@ -156,6 +194,9 @@ def analyze():
     Query Parameters:
         symbol (str): Stock symbol to analyze (e.g., RELIANCE.NS)
     """
+    rl = _rate_limit_check("/analyze")
+    if rl:
+        return rl
     try:
         symbol = request.args.get("symbol", "").strip().upper()
         if not symbol:
@@ -439,6 +480,35 @@ def broker_status():
         status["paper_note"] = "Running in paper trading mode. No real orders placed."
 
     return jsonify(status)
+
+
+@app.route("/broker/kite/token", methods=["POST"])
+@require_auth
+def kite_store_token():
+    """
+    Store a new Kite access token.
+
+    JSON body:
+        access_token  (str, required)  — Kite access token from OAuth flow
+        request_token (str, optional)  — Kite request token (for audit)
+    """
+    body = request.get_json(silent=True) or {}
+    access_token  = (body.get("access_token") or "").strip()
+    request_token = (body.get("request_token") or "").strip()
+
+    if not access_token:
+        return jsonify({"error": "access_token is required"}), 400
+
+    from auth.kite_token_refresh import store_token, get_token_expiry
+    ok = store_token(access_token, request_token)
+    if not ok:
+        return jsonify({"error": "Failed to store token"}), 500
+
+    expiry = get_token_expiry()
+    return jsonify({
+        "stored":      True,
+        "valid_until": expiry.isoformat() if expiry else None,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -758,6 +828,9 @@ def backtest_run():
         interval        (str)   optional, default "1d"
         initial_capital (float) optional, default from BACKTEST_DEFAULT_CAPITAL
     """
+    rl = _rate_limit_check("/backtest/run")
+    if rl:
+        return rl
     try:
         body = request.get_json(silent=True) or {}
         symbol = (body.get("symbol") or "").strip().upper()
@@ -867,6 +940,9 @@ def backtest_walk_forward():
         initial_capital (float) optional
         n_splits        (int)   optional, default 5
     """
+    rl = _rate_limit_check("/backtest/walk-forward")
+    if rl:
+        return rl
     try:
         body = request.get_json(silent=True) or {}
         symbol = (body.get("symbol") or "").strip().upper()
