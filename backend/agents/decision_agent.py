@@ -34,7 +34,10 @@ DEFAULT_EV_CONFIG = {
     # Fix 1: symmetric gain/loss multipliers → break-even at P(up) = 0.50
     "gain_multiplier":  1.0,
     "loss_multiplier":  1.0,
-    "ev_threshold":     0.005,  # dimensionless (EV/price); ~0.5% move threshold
+    # Decision rule: P(up)-based thresholds, not EV/price (which is price-scale dependent)
+    # BUY  when P(up) > p_threshold       (default 0.60)
+    # SELL when P(up) < 1 - p_threshold   (default 0.40)
+    "p_threshold":      0.60,
     # Fix 5: exponential decay sigma for S/R proximity (fraction of price)
     "sr_decay_sigma":   0.03,
 }
@@ -154,7 +157,7 @@ def compute_probability(
     )
     """
     if weights is None:
-        weights = DEFAULT_WEIGHTS
+        weights = DEFAULT_WEIGHTS.copy()
 
     z = (
         weights.get("w_bias",       0.0) * 1.0 +
@@ -199,8 +202,13 @@ def compute_expected_value(
 # ---------------------------------------------------------------------------
 # Step 4b — Risk proxy
 # ---------------------------------------------------------------------------
-def compute_risk(volatility: float, p_loss: float) -> float:
-    return volatility * p_loss
+def compute_risk(volatility_norm: float, p_loss: float) -> float:
+    """
+    Dimensionless risk score. Uses normalised volatility (ATR/price) so
+    the result is scale-invariant — a ₹2400 stock and a ₹200 stock with the
+    same % volatility and the same confidence will have the same risk score.
+    """
+    return volatility_norm * p_loss
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +217,8 @@ def compute_risk(volatility: float, p_loss: float) -> float:
 def _load_weights() -> dict:
     try:
         from memory.weights_store import load_weights
-        return load_weights()
+        w = load_weights()
+        return w if isinstance(w, dict) else DEFAULT_WEIGHTS.copy()
     except Exception:
         return DEFAULT_WEIGHTS.copy()
 
@@ -269,35 +278,38 @@ def make_decision(
         # Step 4 — EV
         ev_raw = compute_expected_value(p_up, volatility, config)
 
-        # Fix 6 — normalise EV by price for comparable confidence
+        # EV normalised by price (kept for logging/API output; no longer used for decisions)
         if current_price and current_price > 0:
             ev_norm = ev_raw / current_price
         else:
             ev_norm = ev_raw
 
-        # Step 4b — risk proxy
-        risk = compute_risk(volatility, p_loss)
+        # Step 4b — risk: dimensionless (ATR/price × P_loss)
+        risk = compute_risk(features["volatility_norm"], p_loss)
 
-        # Step 5 — decision rule on normalised EV
-        threshold = config.get("ev_threshold", 0.005)
-        if ev_norm > threshold:
+        # Step 5 — decision rule on P(up) threshold (price-scale invariant)
+        # Secondary gate: EV must be positive (ev_raw > 0 ↔ p_up > 0.5 with symmetric multipliers)
+        p_threshold = config.get("p_threshold", 0.60)
+        if p_up > p_threshold and ev_raw > 0:
             action = "BUY"
-        elif ev_norm < -threshold:
+        elif p_up < (1.0 - p_threshold) and ev_raw < 0:
             action = "SELL"
         else:
             action = "WAIT"
 
-        # Fix 6 — confidence = |EV_norm|  (dimensionless %, comparable across symbols)
-        confidence = abs(ev_norm)
+        # Confidence = how far P(up) is from the 0.5 coin-flip boundary, scaled to [0, 1]
+        # 0.0 = no edge (p_up = 0.5), 1.0 = absolute certainty (p_up = 0 or 1)
+        confidence = 2.0 * abs(p_up - 0.5)
 
         reason = (
-            f"P(up)={p_up:.3f}, EV={ev_raw:.4f} (norm={ev_norm:.5f}, threshold ±{threshold}), "
+            f"P(up)={p_up:.3f} (threshold {p_threshold:.2f}), "
+            f"confidence={confidence:.3f}, EV={ev_raw:.4f}, "
             f"trend={features['trend']:+.0f}, sentiment={features['sentiment']:+.0f}, "
             f"pattern={pattern.get('pattern','none')} "
             f"(dir={features['pattern_direction']:+.0f} × conf={features['pattern_confidence']:.2f}), "
             f"S/R={sr_signal:.3f}, vol_norm={features['volatility_norm']:.4f}, "
             f"volume_signal={features['volume_signal']:.3f}, "
-            f"risk(vol×P_loss)={risk:.4f}"
+            f"risk(vol_norm×P_loss)={risk:.6f}"
         )
 
         logger.info(f"[DECISION] {action}: {reason}")

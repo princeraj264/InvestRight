@@ -10,6 +10,7 @@ import pandas as pd
 from backtest.data_loader import split_into_windows
 from backtest.backtest_engine import run_backtest
 from backtest.performance import compute_metrics
+from config import MIN_CANDLES
 from db.connection import db_cursor
 from utils.logger import setup_logger
 
@@ -63,7 +64,7 @@ def run_walk_forward(
         end     = start + fold_size if fold_idx < n_splits - 1 else total_bars
         fold_df = ohlc_df.iloc[start:end].copy()
 
-        if len(fold_df) < 30:
+        if len(fold_df) < MIN_CANDLES:
             logger.warning(f"[WALK_FORWARD] Fold {fold_idx + 1} too small ({len(fold_df)} bars) — skipping")
             continue
 

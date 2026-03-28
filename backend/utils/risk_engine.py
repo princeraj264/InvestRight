@@ -21,12 +21,10 @@ import pandas as pd
 import numpy as np
 from typing import Optional
 from utils.logger import setup_logger
-from safety.capital_limits import check_limit, update_exposure
+from safety.capital_limits import check_limit
+from config import MAX_KELLY_FRACTION, MAX_LOSS_HARD_CAP
 
 logger = setup_logger(__name__)
-
-MAX_KELLY_FRACTION = 0.50   # Never risk more than 50% of capital
-MAX_LOSS_HARD_CAP  = 0.10   # Absolute hard cap: reject if stop implies >10% loss
 
 
 def apply_risk(decision: dict, analysis: dict, ohlc: pd.DataFrame, symbol: str = None, trace: Optional[object] = None) -> dict:
@@ -144,12 +142,6 @@ def apply_risk(decision: dict, analysis: dict, ohlc: pd.DataFrame, symbol: str =
                 return _wait(
                     cap_reason,
                     entry=entry_price, sl=stop_loss, tgt=target, rr=rr_ratio, ml=max_loss_pct,
-                )
-            # Update exposure — log critical warning if DB write fails but do not block
-            if not update_exposure(symbol, position_size_fraction):
-                logger.critical(
-                    f"[RISK] Capital exposure update FAILED for {symbol} — "
-                    f"trade will proceed but exposure tracking is inconsistent"
                 )
 
         logger.info(

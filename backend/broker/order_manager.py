@@ -27,9 +27,11 @@ def calculate_quantity(
     Returns 0 when the result would be less than 1 share.
     """
     if total_capital <= 0:
-        raise EnvironmentError(
-            "TOTAL_CAPITAL must be set and greater than zero."
+        logger.error(
+            "[ORDER_MGR] TOTAL_CAPITAL is zero or not set — "
+            "cannot calculate quantity. Returning 0."
         )
+        return 0
     if not entry_price:
         logger.error("[ORDER_MGR] entry_price is zero or None — returning 0 shares")
         return 0
@@ -175,6 +177,11 @@ def handle_fill(broker_order_id: str, status_result: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 def _update_order_status(order_id: str, status: str, reason: str = None):
+    if not order_id:
+        logger.warning(
+            f"[ORDER_MGR] _update_order_status called with null order_id (status={status}) — skipping"
+        )
+        return
     try:
         with db_cursor() as cur:
             cur.execute(

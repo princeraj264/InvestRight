@@ -6,7 +6,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
-const API_BASE = window.location.origin.replace(/:\d+$/, ':5001');
+const API_BASE = 'http://localhost:5001';
 
 // ---------------------------------------------------------------------------
 // Auth helpers
@@ -20,7 +20,7 @@ async function apiFetch(path, opts = {}) {
   const token = getToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;
   const res = await fetch(`${API_BASE}${path}`, { ...opts, headers });
-  if (res.status === 401) { clearToken(); window.location.reload(); }
+  if (res.status === 401) { clearToken(); window.location.reload(); throw new Error('Session expired'); }
   return res;
 }
 

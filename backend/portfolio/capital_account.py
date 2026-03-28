@@ -70,42 +70,27 @@ def deploy_capital(amount: float, symbol: str) -> bool:
         return False
     try:
         with db_cursor() as cur:
+            # Atomic UPDATE: the WHERE clause checks available_capital in the same
+            # statement that modifies it, preventing the SELECT-then-INSERT race condition.
             cur.execute(
                 """
-                SELECT total_capital, deployed_capital, available_capital, realised_pnl
-                FROM capital_account ORDER BY updated_at DESC LIMIT 1
-                """
+                UPDATE capital_account
+                SET deployed_capital  = deployed_capital + %s,
+                    available_capital = available_capital - %s,
+                    updated_at        = NOW()
+                WHERE available_capital >= %s
+                RETURNING deployed_capital, available_capital
+                """,
+                (amount, amount, amount),
             )
             row = cur.fetchone()
             if row is None:
-                logger.error("[CAPITAL_ACCOUNT] No account row found during deploy")
-                return False
-
-            total, deployed, available, realised = (float(v) for v in row)
-
-            if amount > available:
                 logger.warning(
                     f"[CAPITAL_ACCOUNT] Insufficient capital for {symbol}: "
-                    f"requested ₹{amount:,.2f}, available ₹{available:,.2f}"
+                    f"requested ₹{amount:,.2f} — no account row or available_capital too low"
                 )
                 return False
-
-            new_deployed  = deployed + amount
-            new_available = available - amount
-
-            if new_available < 0:
-                logger.warning(
-                    f"[CAPITAL_ACCOUNT] available_capital would go negative for {symbol}"
-                )
-
-            cur.execute(
-                """
-                INSERT INTO capital_account
-                    (total_capital, deployed_capital, available_capital, realised_pnl)
-                VALUES (%s, %s, %s, %s)
-                """,
-                (total, new_deployed, new_available, realised),
-            )
+            new_deployed, new_available = float(row[0]), float(row[1])
 
         logger.info(
             f"[CAPITAL_ACCOUNT] Deployed ₹{amount:,.2f} for {symbol}. "
@@ -120,38 +105,24 @@ def deploy_capital(amount: float, symbol: str) -> bool:
 def release_capital(amount: float, realised_pnl: float) -> bool:
     try:
         with db_cursor() as cur:
+            # Atomic UPDATE — avoids SELECT-then-INSERT race condition.
             cur.execute(
                 """
-                SELECT total_capital, deployed_capital, available_capital, realised_pnl
-                FROM capital_account ORDER BY updated_at DESC LIMIT 1
-                """
+                UPDATE capital_account
+                SET deployed_capital  = GREATEST(deployed_capital - %s, 0),
+                    available_capital = available_capital + %s + %s,
+                    total_capital     = total_capital + %s,
+                    realised_pnl      = realised_pnl + %s,
+                    updated_at        = NOW()
+                RETURNING total_capital, deployed_capital, available_capital
+                """,
+                (amount, amount, realised_pnl, realised_pnl, realised_pnl),
             )
             row = cur.fetchone()
             if row is None:
                 logger.error("[CAPITAL_ACCOUNT] No account row found during release")
                 return False
-
-            total, deployed, available, prev_realised = (float(v) for v in row)
-
-            if amount > deployed:
-                logger.critical(
-                    f"[CAPITAL_ACCOUNT] release amount ₹{amount:,.2f} > deployed "
-                    f"₹{deployed:,.2f} — accounting error, proceeding anyway"
-                )
-
-            new_deployed  = max(deployed - amount, 0.0)
-            new_available = available + amount + realised_pnl
-            new_total     = total + realised_pnl
-            new_realised  = prev_realised + realised_pnl
-
-            cur.execute(
-                """
-                INSERT INTO capital_account
-                    (total_capital, deployed_capital, available_capital, realised_pnl)
-                VALUES (%s, %s, %s, %s)
-                """,
-                (new_total, new_deployed, new_available, new_realised),
-            )
+            new_total, new_deployed, new_available = float(row[0]), float(row[1]), float(row[2])
 
         logger.info(
             f"[CAPITAL_ACCOUNT] Released ₹{amount:,.2f}, P&L={realised_pnl:+.2f}. "

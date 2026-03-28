@@ -13,11 +13,11 @@ import pandas as pd
 import numpy as np
 from typing import Optional
 from utils.logger import setup_logger
+from config import PATTERN_CONFIDENCE_FLOOR, RSI_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL, MIN_CANDLES
 
 logger = setup_logger(__name__)
 
-# Fix 3: lowered from 0.6 to 0.5
-_CONFIDENCE_FLOOR = 0.5
+_CONFIDENCE_FLOOR = PATTERN_CONFIDENCE_FLOOR
 
 
 def detect_pattern(ohlc: pd.DataFrame, trace: Optional[object] = None) -> dict:
@@ -30,7 +30,7 @@ def detect_pattern(ohlc: pd.DataFrame, trace: Optional[object] = None) -> dict:
     _none = {"pattern": "none", "confidence": 0.0, "direction": "neutral"}
 
     try:
-        if ohlc is None or ohlc.empty or len(ohlc) < 30:
+        if ohlc is None or ohlc.empty or len(ohlc) < MIN_CANDLES:
             logger.warning("[PATTERN] Insufficient data for pattern detection")
             return _none
 
@@ -223,7 +223,7 @@ def _detect_head_and_shoulders(close, high, low, volume) -> dict:
 # Fix 3: Momentum signal detectors (new)
 # ---------------------------------------------------------------------------
 
-def _compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
+def _compute_rsi(close: pd.Series, period: int = RSI_PERIOD) -> pd.Series:
     delta = close.diff()
     gain  = delta.clip(lower=0).rolling(window=period, min_periods=1).mean()
     loss  = (-delta.clip(upper=0)).rolling(window=period, min_periods=1).mean()
@@ -264,13 +264,13 @@ def _detect_macd_crossover(close, high, low, volume) -> dict:
     Confidence is based on the magnitude of the cross relative to price.
     """
     try:
-        if len(close) < 35:
+        if len(close) < MACD_SLOW + MACD_SIGNAL:
             return {"pattern": "none", "confidence": 0.0, "direction": "neutral"}
 
-        ema12  = close.ewm(span=12, adjust=False).mean()
-        ema26  = close.ewm(span=26, adjust=False).mean()
+        ema12  = close.ewm(span=MACD_FAST, adjust=False).mean()
+        ema26  = close.ewm(span=MACD_SLOW, adjust=False).mean()
         macd   = ema12 - ema26
-        signal = macd.ewm(span=9, adjust=False).mean()
+        signal = macd.ewm(span=MACD_SIGNAL, adjust=False).mean()
         diff   = macd - signal
 
         price_scale = float(close.iloc[-1]) * 0.001 + 1e-9

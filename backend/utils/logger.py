@@ -11,9 +11,14 @@ class _AuditLogHandler(logging.Handler):
     """
     Bridges stdlib logging.WARNING+ messages to observability/audit_log.
     Uses a lazy import to avoid circular dependencies at module load time.
+    A class-level guard prevents infinite recursion when the DB layer itself logs.
     """
+    _emitting = False  # class-level guard against recursive emit
 
     def emit(self, record: logging.LogRecord) -> None:
+        if _AuditLogHandler._emitting:
+            return
+        _AuditLogHandler._emitting = True
         try:
             from observability.audit_log import log_event
             severity_map = {
@@ -33,6 +38,8 @@ class _AuditLogHandler(logging.Handler):
             )
         except Exception:
             pass  # Never crash on logging failure
+        finally:
+            _AuditLogHandler._emitting = False
 
 
 def setup_logger(name: str) -> logging.Logger:

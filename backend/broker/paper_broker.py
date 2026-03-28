@@ -1,4 +1,3 @@
-import os
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -6,6 +5,7 @@ from typing import Optional
 import yfinance as yf
 
 from broker.base import BaseBroker
+from cache.redis_client import get_ltp as _redis_get_ltp, set_ltp as _redis_set_ltp
 from db.connection import db_cursor
 from utils.logger import setup_logger
 
@@ -128,20 +128,10 @@ class PaperBroker(BaseBroker):
             return False
 
     def get_ltp(self, symbol: str) -> Optional[float]:
-        # Check Redis cache first (60s TTL for LTP)
-        try:
-            import redis as _redis
-            import os
-            r = _redis.from_url(
-                os.getenv("REDIS_URL", "redis://localhost:6379/0"),
-                decode_responses=True,
-                socket_connect_timeout=1,
-            )
-            cached = r.get(f"ltp:{symbol}")
-            if cached is not None:
-                return float(cached)
-        except Exception:
-            pass  # Redis unavailable — proceed to yfinance
+        # Check shared Redis cache first (60s TTL for LTP)
+        cached = _redis_get_ltp(symbol)
+        if cached is not None:
+            return cached
 
         try:
             ticker = yf.Ticker(symbol)
@@ -149,13 +139,7 @@ class PaperBroker(BaseBroker):
             if df.empty:
                 return None
             ltp = float(df["Close"].iloc[-1])
-
-            # Cache for 60 seconds
-            try:
-                r.setex(f"ltp:{symbol}", 60, str(ltp))
-            except Exception:
-                pass
-
+            _redis_set_ltp(symbol, ltp, ttl_seconds=60)
             return ltp
         except Exception as e:
             logger.warning(f"[PAPER] LTP fetch failed for {symbol}: {e}")

@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from main import run
+from utils.market_hours import is_market_open
 from portfolio.exit_monitor import run_exit_checks
 from portfolio.pnl_calculator import take_snapshot
 from safety.kill_switch import check_and_halt_if_degraded
@@ -46,6 +47,9 @@ def degradation_check_job():
 
 def analysis_job(symbol):
     """Run the full analysis pipeline for a symbol."""
+    if not is_market_open():
+        logger.info(f"[SCHEDULER] Market closed — skipping analysis for {symbol}")
+        return
     # Skip if kill switch is active (including auto-halt from degradation check)
     from safety.kill_switch import is_trading_halted
     if is_trading_halted():
@@ -83,6 +87,33 @@ def log_retention_job():
         logger.error(f"[SCHEDULER] log_retention_job error: {e}")
 
 
+def pending_trade_evaluation_job():
+    """
+    Evaluate any trades that are still pending result by checking
+    current price against their stop loss and target.
+    Only runs during market hours.
+    """
+    if not is_market_open():
+        return
+    from memory.memory_store import get_all_trades
+    from agents.feedback_agent import evaluate
+    from broker.broker_factory import get_broker
+    broker = get_broker()
+    trades = get_all_trades()
+    pending = [
+        t for t in trades.values()
+        if t.get("result") is None or t.get("result") == "pending"
+    ]
+    logger.info(f"[SCHEDULER] Evaluating {len(pending)} pending trades")
+    for trade in pending:
+        symbol   = trade.get("symbol")
+        trade_id = trade.get("trade_id")
+        ltp = broker.get_ltp(symbol)
+        if ltp is None:
+            continue
+        evaluate(trade_id, ltp)
+
+
 def db_cleanup_job():
     """ANALYZE tables and reset stale backtest runs (runs at 03:00 IST)."""
     logger.info("[SCHEDULER] Running DB cleanup")
@@ -101,6 +132,8 @@ def db_cleanup_job():
 
 def run_scheduler():
     """Set up and run the scheduler."""
+    from config import validate_required_env
+    validate_required_env()
     symbols = getattr(Config, 'SYMBOLS', ['RELIANCE.NS'])
 
     # Degradation check — runs every 15 min, BEFORE analysis
@@ -113,6 +146,10 @@ def run_scheduler():
     for symbol in symbols:
         schedule.every(15).minutes.do(analysis_job, symbol)
         logger.info(f"[SCHEDULER] Scheduled analysis for {symbol} every 15 minutes")
+
+    # Pending trade evaluation — every 15 min during market hours
+    schedule.every(15).minutes.do(pending_trade_evaluation_job)
+    logger.info("[SCHEDULER] Scheduled pending trade evaluation every 15 minutes")
 
     # Daily P&L snapshot at market close (15:30 IST)
     schedule.every().day.at("15:30").do(snapshot_job)
@@ -130,6 +167,7 @@ def run_scheduler():
     # Run once immediately at startup
     degradation_check_job()
     exit_job()
+    pending_trade_evaluation_job()
     for symbol in symbols:
         analysis_job(symbol)
 

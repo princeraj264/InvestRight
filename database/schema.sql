@@ -16,19 +16,6 @@ CREATE TABLE IF NOT EXISTS trades (
     created_at          TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS positions (
-    position_id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    symbol              VARCHAR(20) NOT NULL,
-    trade_id            UUID REFERENCES trades(trade_id),
-    quantity            NUMERIC(12, 4),
-    avg_entry           NUMERIC(12, 4),
-    current_price       NUMERIC(12, 4),
-    unrealised_pnl      NUMERIC(12, 4),
-    status              VARCHAR(10) CHECK (status IN ('open', 'closed')),
-    opened_at           TIMESTAMPTZ DEFAULT NOW(),
-    closed_at           TIMESTAMPTZ
-);
-
 CREATE TABLE IF NOT EXISTS weights (
     id                  SERIAL PRIMARY KEY,
     w_bias              NUMERIC(10, 6) NOT NULL,
@@ -123,7 +110,10 @@ CREATE INDEX IF NOT EXISTS idx_orders_trade_id ON orders(trade_id);
 CREATE INDEX IF NOT EXISTS idx_orders_status   ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_orders_symbol   ON orders(symbol);
 
--- Capital account — single source of truth for money
+-- Capital account — single source of truth for money.
+-- Exactly one row must exist at all times.
+-- deploy_capital() and release_capital() use atomic UPDATE (not INSERT).
+-- Only capital_account.initialise() may INSERT the seed row.
 CREATE TABLE IF NOT EXISTS capital_account (
     id                  SERIAL PRIMARY KEY,
     total_capital       NUMERIC(15, 2) NOT NULL,
@@ -132,10 +122,11 @@ CREATE TABLE IF NOT EXISTS capital_account (
     realised_pnl        NUMERIC(15, 2) NOT NULL DEFAULT 0.00,
     updated_at          TIMESTAMPTZ DEFAULT NOW()
 );
+-- Enforce single-row invariant: unique index on a constant expression.
+-- This will fail loudly if a second row is ever inserted accidentally.
+CREATE UNIQUE INDEX IF NOT EXISTS capital_account_single_row ON capital_account ((1));
 
--- Drop and recreate positions with full schema (replaces Batch 1 placeholder)
-DROP TABLE IF EXISTS positions CASCADE;
-
+-- Full positions schema — safe to run multiple times (CREATE IF NOT EXISTS)
 CREATE TABLE IF NOT EXISTS positions (
     position_id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     trade_id            UUID REFERENCES trades(trade_id),

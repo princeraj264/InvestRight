@@ -139,7 +139,8 @@ def execute(decision: dict, symbol: str, trace: Optional[object] = None) -> dict
         # ------------------------------------------------------------------
         if is_trading_halted():
             logger.warning(f"[ACTION] Kill switch active mid-execution — cancelling trade {trade_id}")
-            update_trade_result(trade_id, "wrong")
+            # Do NOT mark as "wrong" — no order was placed, so this is not a model error.
+            # The trade record remains pending/unresolved in the DB.
             return {**_no_exec("Kill switch activated before order placement"),
                     "trade_id": trade_id, "trade_record": trade_record}
 
@@ -209,7 +210,7 @@ def execute(decision: dict, symbol: str, trace: Optional[object] = None) -> dict
                 "stop_loss":    decision.get("stop_loss"),
                 "target":       decision.get("target"),
             }
-            position = open_position(fill_data)
+            position = open_position(fill_data, position_size_fraction=decision.get("position_size_fraction", 0.0))
             if position:
                 position_id = position.get("position_id")
             else:

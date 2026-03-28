@@ -153,10 +153,14 @@ class KiteBroker(BaseBroker):
             logger.critical(
                 f"[KITE] Token expired/invalid — activating kill switch: {e}"
             )
-            activate_kill_switch(
+            if not activate_kill_switch(
                 reason=f"Kite token expired: {e}",
                 activated_by="kite_broker_auto"
-            )
+            ):
+                logger.critical(
+                    "[KITE] activate_kill_switch DB write FAILED — "
+                    "trading may continue with expired token. Manual intervention required."
+                )
             return self._failed(f"Token expired — kill switch activated: {e}", order_params)
 
         except NetworkException as e:
@@ -202,10 +206,14 @@ class KiteBroker(BaseBroker):
 
         except TokenException as e:
             logger.critical(f"[KITE] Token expired during status poll — activating kill switch")
-            activate_kill_switch(
+            if not activate_kill_switch(
                 reason=f"Kite token expired during poll: {e}",
                 activated_by="kite_broker_auto"
-            )
+            ):
+                logger.critical(
+                    "[KITE] activate_kill_switch DB write FAILED during poll — "
+                    "trading may continue with expired token. Manual intervention required."
+                )
             return self._status_dict(broker_order_id, "FAILED", 0, None, f"Token expired: {e}")
 
         except NetworkException as e:

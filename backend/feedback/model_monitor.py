@@ -96,27 +96,32 @@ def compute_accuracy_window(last_n_trades: int = 30) -> dict:
         cal_sum    = 0.0
 
         for action, result, fv in rows:
-            if isinstance(fv, str):
-                import json
-                fv = json.loads(fv)
+            try:
+                if isinstance(fv, str):
+                    import json
+                    fv = json.loads(fv)
+                if not isinstance(fv, dict):
+                    fv = {}
 
-            # Estimate probability_up from features — use pattern_confidence
-            # as a confidence proxy (available in features_vector)
-            prob_up    = float(fv.get("probability_up", 0.5)) if "probability_up" in (fv or {}) else 0.5
-            confidence = abs(prob_up - 0.5) * 2   # distance from 0.5, normalised [0,1]
+                # Estimate probability_up from features — use pattern_confidence
+                # as a confidence proxy (available in features_vector)
+                prob_up    = float(fv.get("probability_up", 0.5)) if "probability_up" in fv else 0.5
+                confidence = abs(prob_up - 0.5) * 2   # distance from 0.5, normalised [0,1]
 
-            # Was price prediction directionally correct?
-            actual_up = _is_up(action, result)   # 1 if price went up, 0 if went down
+                # Was price prediction directionally correct?
+                actual_up = _is_up(action, result)   # 1 if price went up, 0 if went down
 
-            if actual_up is not None:
-                if result == "correct":
-                    correct += 1
-                else:
-                    wrong += 1
+                if actual_up is not None:
+                    if result == "correct":
+                        correct += 1
+                    else:
+                        wrong += 1
 
-                brier_sum += (prob_up - actual_up) ** 2
-                conf_sum  += confidence
-                cal_sum   += abs(confidence - int(result == "correct"))
+                    brier_sum += (prob_up - actual_up) ** 2
+                    conf_sum  += confidence
+                    cal_sum   += abs(confidence - int(result == "correct"))
+            except Exception:
+                continue  # skip malformed rows, never crash health check
 
         completed = correct + wrong
         if completed == 0:

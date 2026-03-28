@@ -55,9 +55,12 @@ def call_llm(
             _api_key_missing_logged = True
         return None
 
-    # Truncate over-long prompts (preserve first 60% + last 40%)
+    # Truncate over-long prompts (preserve first 80% + last 20%).
+    # Trading analysis prompts are front-loaded: prices, signals, and OHLCV data
+    # appear at the start, while boilerplate instructions appear at the end.
+    # Dropping from the back loses less critical context than dropping from the front.
     if len(prompt) > _MAX_PROMPT_CHARS:
-        keep_start = int(_MAX_PROMPT_CHARS * 0.6)
+        keep_start = int(_MAX_PROMPT_CHARS * 0.8)
         keep_end   = _MAX_PROMPT_CHARS - keep_start
         truncated  = prompt[:keep_start] + "\n[...truncated...]\n" + prompt[-keep_end:]
         _logger.warning(

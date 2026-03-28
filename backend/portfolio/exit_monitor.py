@@ -9,7 +9,7 @@ from typing import Optional
 from broker.broker_factory import get_broker
 from broker.order_manager import submit_order, poll_order_status
 from portfolio.position_manager import (
-    get_open_positions, close_position, update_current_prices
+    get_open_positions, get_position, close_position, update_current_prices
 )
 from agents.feedback_agent import record_outcome
 from utils.logger import setup_logger
@@ -188,6 +188,18 @@ def execute_exit(position: dict, exit_price: float, exit_reason: str) -> bool:
         return False
 
     actual_exit_price = fill_result.get("filled_price") or exit_price
+
+    # Re-fetch the position from DB to guard against a concurrent close
+    # (e.g. another exit_monitor process or a manual close running in parallel).
+    fresh = get_position(position_id)
+    if fresh is None:
+        logger.error(f"[EXIT_MONITOR] Position {position_id} not found after fill — cannot close")
+        return False
+    if fresh.get("status") == "closed":
+        logger.info(
+            f"[EXIT_MONITOR] Position {position_id} already closed by concurrent process — skipping"
+        )
+        return True
 
     # Close position in DB
     closed = close_position(position_id, actual_exit_price, exit_reason)

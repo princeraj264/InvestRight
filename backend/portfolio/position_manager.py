@@ -2,13 +2,13 @@ from datetime import datetime, timezone
 from typing import Optional
 from db.connection import db_cursor
 from portfolio.capital_account import deploy_capital, release_capital
-from safety.capital_limits import reset_exposure
+from safety.capital_limits import reset_exposure, update_exposure
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
 
-def open_position(fill_data: dict) -> Optional[dict]:
+def open_position(fill_data: dict, position_size_fraction: float = 0.0) -> Optional[dict]:
     """
     Open a position after a confirmed fill.
     Deploys capital atomically — if deploy fails, position is NOT inserted.
@@ -51,18 +51,27 @@ def open_position(fill_data: dict) -> Optional[dict]:
                 """
                 INSERT INTO positions (
                     trade_id, order_id, symbol, action, quantity,
-                    entry_price, stop_loss, target, capital_deployed, status
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'open')
+                    entry_price, current_price, stop_loss, target,
+                    capital_deployed, unrealised_pnl, status
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0.00, 'open')
                 RETURNING position_id, opened_at
                 """,
                 (
                     trade_id, order_id, symbol, action, quantity,
-                    filled_price, stop_loss, target, capital_deployed,
+                    filled_price, filled_price, stop_loss, target, capital_deployed,
                 ),
             )
             row = cur.fetchone()
             position_id = str(row[0])
             opened_at   = row[1].isoformat() if row[1] else None
+
+        # Record capital exposure now that position is confirmed in DB
+        if position_size_fraction and symbol:
+            if not update_exposure(symbol, position_size_fraction):
+                logger.critical(
+                    f"[POSITION] Capital exposure update FAILED for {symbol} — "
+                    f"position opened but exposure tracking is inconsistent"
+                )
 
         logger.info(
             f"[POSITION] Opened: {action} {quantity}x {symbol} @ {filled_price:.2f} "
@@ -126,7 +135,11 @@ def close_position(position_id: str, exit_price: float, exit_reason: str) -> Opt
             )
 
         release_capital(capital_deployed, realised_pnl)
-        reset_exposure(symbol)
+        if not reset_exposure(symbol):
+            logger.critical(
+                f"[POSITION] reset_exposure FAILED for {symbol} after closing {position_id} — "
+                f"exposure tracking is inconsistent, manual fix required"
+            )
 
         logger.info(
             f"[POSITION] Closed {position_id} ({symbol}) @ {exit_price:.2f} "

@@ -3,16 +3,21 @@ Performance metrics computation for backtesting.
 All functions are pure (read-only) — no DB writes.
 """
 import math
+import os
 from typing import List, Optional
 
 import numpy as np
 
 from utils.logger import setup_logger
 
+# Annualisation factor — override via BACKTEST_PERIODS_PER_YEAR env var.
+# 252 = daily bars (default). Use 252*26 ≈ 6552 for 15-min bars, etc.
+_PERIODS_PER_YEAR = int(os.getenv("BACKTEST_PERIODS_PER_YEAR", "252"))
+
 logger = setup_logger(__name__)
 
 
-def compute_metrics(trades: list, initial_capital: float) -> dict:
+def compute_metrics(trades: list, initial_capital: float, periods_per_year: int = None) -> dict:
     """
     Compute aggregated performance metrics from a list of completed trades.
 
@@ -48,7 +53,7 @@ def compute_metrics(trades: list, initial_capital: float) -> dict:
     final_capital = equity_curve[-1]
     total_return  = (final_capital - initial_capital) / initial_capital if initial_capital else 0.0
 
-    sharpe    = compute_sharpe_ratio(equity_curve)
+    sharpe    = compute_sharpe_ratio(equity_curve, periods_per_year=periods_per_year or _PERIODS_PER_YEAR)
     max_dd    = compute_max_drawdown(equity_curve)
     exp_value = compute_expectancy(trades)
 

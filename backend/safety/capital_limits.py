@@ -82,10 +82,10 @@ def update_exposure(symbol: str, position_size: float) -> bool:
                 INSERT INTO capital_limits (symbol, current_exposure_pct)
                 VALUES (%s, %s)
                 ON CONFLICT (symbol) DO UPDATE
-                SET current_exposure_pct = capital_limits.current_exposure_pct + EXCLUDED.current_exposure_pct,
+                SET current_exposure_pct = capital_limits.current_exposure_pct + %s,
                     updated_at = NOW()
                 """,
-                (symbol, proposed_pct),
+                (symbol, proposed_pct, proposed_pct),
             )
         logger.info(f"[CAPITAL] Exposure updated for {symbol}: +{proposed_pct:.1f}%")
         return True

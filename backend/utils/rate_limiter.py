@@ -106,8 +106,10 @@ def check_rate_limit(client_id: str, endpoint: str) -> Tuple[bool, dict]:
             pipe.ttl(key)
             count, ttl = pipe.execute()
 
-            if ttl < 0:
-                # Key has no TTL yet (first hit) — set it
+            if ttl == -1:
+                # Key exists but has no TTL yet (first hit) — set it.
+                # ttl == -2 means the key does not exist, which should not
+                # happen right after INCR, so only set expire for ttl == -1.
                 r.expire(key, _WINDOW_SECS)
                 ttl = _WINDOW_SECS
 

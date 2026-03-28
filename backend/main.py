@@ -27,6 +27,16 @@ from utils.rate_limiter import check_rate_limit
 
 logger = setup_logger(__name__)
 
+_UUID_RE = re.compile(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+    re.IGNORECASE
+)
+
+
+def _is_valid_uuid(value: str) -> bool:
+    return bool(_UUID_RE.match(value)) if value else False
+
+
 _API_KEY = os.getenv("API_KEY")
 if not _API_KEY:
     raise EnvironmentError("API_KEY environment variable is not set.")
@@ -543,6 +553,8 @@ def portfolio_positions():
 @require_auth
 def portfolio_position(position_id):
     """Single position P&L detail."""
+    if not _is_valid_uuid(position_id):
+        return jsonify({"error": "Invalid position_id format"}), 400
     from portfolio.pnl_calculator import get_position_pnl
     result = get_position_pnl(position_id)
     if result is None:
@@ -557,6 +569,8 @@ def close_position_manual(position_id):
     Manually close a position.
     Kill switch does NOT block manual closes — exits must always work.
     """
+    if not _is_valid_uuid(position_id):
+        return jsonify({"error": "Invalid position_id format"}), 400
     try:
         from portfolio.position_manager import get_position, close_position
         from broker.broker_factory import get_broker
@@ -881,6 +895,8 @@ def backtest_list_runs():
 @require_auth
 def backtest_get_run(run_id):
     """Return full summary for a single backtest run."""
+    if not _is_valid_uuid(run_id):
+        return jsonify({"error": "Invalid run_id format"}), 400
     from backtest.report_generator import generate_summary
     summary = generate_summary(run_id)
     if summary is None:
@@ -892,6 +908,8 @@ def backtest_get_run(run_id):
 @require_auth
 def backtest_run_trades(run_id):
     """Return trade-by-trade breakdown for a run."""
+    if not _is_valid_uuid(run_id):
+        return jsonify({"error": "Invalid run_id format"}), 400
     from backtest.report_generator import get_trade_breakdown
     return jsonify({"run_id": run_id, "trades": get_trade_breakdown(run_id)})
 
@@ -900,6 +918,8 @@ def backtest_run_trades(run_id):
 @require_auth
 def backtest_equity_curve(run_id):
     """Return the equity curve for a run."""
+    if not _is_valid_uuid(run_id):
+        return jsonify({"error": "Invalid run_id format"}), 400
     from backtest.report_generator import get_equity_curve
     return jsonify({"run_id": run_id, "equity_curve": get_equity_curve(run_id)})
 
@@ -926,11 +946,36 @@ def backtest_compare():
         return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
 
+def _walk_forward_thread(run_id, symbol, start_date, end_date, interval, initial_capital, n_splits):
+    """Background thread: load data then run walk-forward validation."""
+    from backtest.data_loader import load_historical_data
+    from backtest.walk_forward import run_walk_forward
+    from backtest.backtest_engine import _update_run_status
+    import json
+
+    ohlc_df = load_historical_data(symbol, start_date, end_date, interval=interval)
+    if ohlc_df is None or ohlc_df.empty:
+        _update_run_status(run_id, "failed", error="Failed to load historical data")
+        return
+
+    try:
+        result = run_walk_forward(
+            symbol=symbol,
+            ohlc_df=ohlc_df,
+            initial_capital=initial_capital,
+            n_splits=n_splits,
+        )
+        _update_run_status(run_id, "completed", metrics=result)
+    except Exception as e:
+        _update_run_status(run_id, "failed", error=str(e))
+
+
 @app.route("/backtest/walk-forward", methods=["POST"])
 @require_auth
 def backtest_walk_forward():
     """
-    Run walk-forward validation (synchronous — may take several minutes).
+    Launch an async walk-forward validation. Returns run_id immediately;
+    check status via GET /backtest/runs/<run_id>.
 
     Required JSON body:
         symbol          (str)
@@ -948,6 +993,8 @@ def backtest_walk_forward():
         symbol = (body.get("symbol") or "").strip().upper()
         if not symbol:
             return jsonify({"error": "symbol is required"}), 400
+        if not re.match(r"^[A-Z0-9.\-]{1,20}$", symbol):
+            return jsonify({"error": "Invalid symbol format"}), 400
 
         start_date = body.get("start_date", "")
         end_date   = body.get("end_date",   "")
@@ -959,20 +1006,18 @@ def backtest_walk_forward():
         initial_capital = float(body.get("initial_capital", default_capital))
         n_splits        = int(body.get("n_splits", 5))
 
-        from backtest.data_loader import load_historical_data
-        from backtest.walk_forward import run_walk_forward
+        run_id = str(uuid.uuid4())
+        _create_backtest_run_row(run_id, symbol, start_date, end_date, interval, initial_capital)
 
-        ohlc_df = load_historical_data(symbol, start_date, end_date, interval=interval)
-        if ohlc_df is None or ohlc_df.empty:
-            return jsonify({"error": "Failed to load historical data for symbol"}), 422
-
-        result = run_walk_forward(
-            symbol=symbol,
-            ohlc_df=ohlc_df,
-            initial_capital=initial_capital,
-            n_splits=n_splits,
+        t = threading.Thread(
+            target=_walk_forward_thread,
+            args=(run_id, symbol, start_date, end_date, interval, initial_capital, n_splits),
+            daemon=True,
         )
-        return jsonify(result)
+        t.start()
+
+        logger.info(f"[API] Walk-forward launched: run_id={run_id} symbol={symbol}")
+        return jsonify({"run_id": run_id, "status": "running"}), 202
 
     except Exception as e:
         logger.error(f"[API] /backtest/walk-forward error: {e}")
@@ -997,6 +1042,11 @@ def run(symbol: str) -> dict:
         if is_trading_halted():
             logger.warning(f"[PIPELINE] Trading halted — skipping pipeline for {symbol}")
             return {"error": "Trading halted", "symbol": symbol, "trace_id": trace.trace_id}
+
+        from utils.market_hours import is_market_open
+        if not is_market_open():
+            logger.info(f"[PIPELINE] Market closed — skipping pipeline for {symbol}")
+            return {"decision": "WAIT", "reason": "Market closed", "symbol": symbol}
 
         data = fetch_and_package_data(symbol, trace=trace)
         if data is None:
@@ -1028,5 +1078,7 @@ def run(symbol: str) -> dict:
 
 
 if __name__ == "__main__":
+    from config import validate_required_env
+    validate_required_env()
     debug_mode = os.getenv("FLASK_DEBUG", "false").lower() == "true"
     app.run(debug=debug_mode, host="0.0.0.0", port=5001)

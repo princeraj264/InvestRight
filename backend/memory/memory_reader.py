@@ -1,6 +1,6 @@
 from utils.logger import setup_logger
 from db.connection import db_cursor
-from memory.memory_store import get_trade, update_trade_result, get_all_trades, _save_memory  # noqa: F401
+from memory.memory_store import get_trade, update_trade_result, get_all_trades
 
 logger = setup_logger(__name__)
 

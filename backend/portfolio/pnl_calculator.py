@@ -1,8 +1,11 @@
 from datetime import datetime, timezone, date
 from typing import Optional
+import pytz
 from db.connection import db_cursor
 from portfolio.capital_account import get_account
 from utils.logger import setup_logger
+
+_IST = pytz.timezone("Asia/Kolkata")
 
 logger = setup_logger(__name__)
 
@@ -164,7 +167,8 @@ def get_symbol_pnl(symbol: str) -> dict:
 
 
 def get_daily_pnl() -> dict:
-    today = date.today()
+    # Use IST date so the SQL AT TIME ZONE 'Asia/Kolkata' and the date parameter are consistent.
+    today = datetime.now(_IST).date()
     try:
         with db_cursor() as cur:
             cur.execute(

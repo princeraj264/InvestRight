@@ -2,6 +2,7 @@
 In-memory latency metrics collector.
 Aggregates per-component timing, flushes to pipeline_metrics every 5 minutes.
 """
+import os
 import threading
 import time
 from collections import defaultdict
@@ -11,7 +12,7 @@ _lock = threading.Lock()
 # Stores list of (timestamp, duration_ms, status, trace_id, symbol)
 _timings: dict = defaultdict(list)
 _last_flush: float = time.monotonic()
-_FLUSH_INTERVAL_S = 300  # 5 minutes
+_FLUSH_INTERVAL_S = int(os.getenv("METRICS_FLUSH_INTERVAL_S", "300"))  # default 5 minutes
 
 
 def record_timing(

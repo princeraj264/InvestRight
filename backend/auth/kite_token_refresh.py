@@ -10,6 +10,7 @@ URL. Manual refresh via POST /broker/kite/token is the supported flow.
 """
 import os
 import logging
+import pytz
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -17,27 +18,25 @@ from db.connection import db_cursor
 
 _logger = logging.getLogger("kite_token_refresh")
 
-# IST offset (+5:30)
-_IST_OFFSET = timedelta(hours=5, minutes=30)
+_IST = pytz.timezone("Asia/Kolkata")
 
 
 def _next_kite_expiry() -> datetime:
     """
     Return the next 06:00 IST expiry as a UTC datetime.
     If 06:00 IST today is already past, returns 06:00 IST tomorrow.
+    Uses pytz for correct timezone-aware arithmetic.
     """
-    now_utc = datetime.now(timezone.utc)
-    now_ist = now_utc + _IST_OFFSET
+    now_ist = datetime.now(_IST)
 
-    # Build today's 06:00 IST
+    # Build today's 06:00 IST (tz-aware)
     expiry_ist = now_ist.replace(hour=6, minute=0, second=0, microsecond=0)
     if expiry_ist <= now_ist:
         # Already past today's 06:00 IST → use tomorrow
         expiry_ist += timedelta(days=1)
 
-    # Convert back to UTC
-    expiry_utc = expiry_ist - _IST_OFFSET
-    return expiry_utc.replace(tzinfo=timezone.utc)
+    # Convert to UTC (pytz handles DST automatically, though India has none)
+    return expiry_ist.astimezone(timezone.utc)
 
 
 def store_token(access_token: str, request_token: str = "") -> bool:

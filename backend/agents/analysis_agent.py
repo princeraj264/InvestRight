@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from utils.logger import setup_logger
 from typing import Optional
+from config import SMA_FAST, SMA_SLOW, ATR_PERIOD, SR_WINDOW
 
 logger = setup_logger(__name__)
 
@@ -30,7 +31,7 @@ _NEGATIVE_WORDS = {
 _SENTIMENT_THRESHOLD = 0.05   # was 0.1 — easier for real headlines to cross
 
 
-def analyze_data(data: dict, trace: Optional[object] = None) -> dict:
+def analyze_data(data: dict, trace: Optional[object] = None, skip_llm_sentiment: bool = False) -> dict:
     """
     Extract structured signals from raw data.
 
@@ -71,14 +72,14 @@ def analyze_data(data: dict, trace: Optional[object] = None) -> dict:
         # ------------------------------------------------------------------
         # 1. Trend — SMA(20) vs SMA(50)
         # ------------------------------------------------------------------
-        sma_20 = close.rolling(window=20, min_periods=1).mean()
-        sma_50 = close.rolling(window=50, min_periods=1).mean()
+        sma_20 = close.rolling(window=SMA_FAST, min_periods=1).mean()
+        sma_50 = close.rolling(window=SMA_SLOW, min_periods=1).mean()
         trend  = "uptrend" if sma_20.iloc[-1] > sma_50.iloc[-1] else "downtrend"
 
         # ------------------------------------------------------------------
         # 2. Support / Resistance — rolling local minima / maxima
         # ------------------------------------------------------------------
-        window = 10
+        window = SR_WINDOW
         support_mask = (
             (low == low.rolling(window=window, center=True).min()) &
             (low.rolling(window=window, center=True).count() == window)
@@ -105,7 +106,7 @@ def analyze_data(data: dict, trace: Optional[object] = None) -> dict:
             (high - prev_close).abs(),
             (low  - prev_close).abs(),
         ], axis=1).max(axis=1)
-        atr        = true_range.rolling(window=14).mean()
+        atr        = true_range.rolling(window=ATR_PERIOD).mean()
         volatility = float(atr.iloc[-1]) if not pd.isna(atr.iloc[-1]) else float(close.std())
 
         # ------------------------------------------------------------------
@@ -113,17 +114,22 @@ def analyze_data(data: dict, trace: Optional[object] = None) -> dict:
         # ------------------------------------------------------------------
         symbol     = data.get("symbol", "")
         trace_id   = getattr(trace, "trace_id", None)
-        try:
-            from llm.sentiment_agent import classify_sentiment_with_score
-            sent_result = classify_sentiment_with_score(news, symbol, trace_id)
-            sentiment            = sent_result["sentiment"]
-            sentiment_confidence = sent_result["confidence"]
-            sentiment_source     = sent_result["source"]
-        except Exception as _sent_err:
-            logger.warning(f"[ANALYSIS] LLM sentiment unavailable: {_sent_err} — using keyword fallback")
+        if skip_llm_sentiment or not news:
             sentiment            = _compute_sentiment(news)
             sentiment_confidence = 0.5
             sentiment_source     = "keyword_fallback"
+        else:
+            try:
+                from llm.sentiment_agent import classify_sentiment_with_score
+                sent_result = classify_sentiment_with_score(news, symbol, trace_id)
+                sentiment            = sent_result["sentiment"]
+                sentiment_confidence = sent_result["confidence"]
+                sentiment_source     = sent_result["source"]
+            except Exception as _sent_err:
+                logger.warning(f"[ANALYSIS] LLM sentiment unavailable: {_sent_err} — using keyword fallback")
+                sentiment            = _compute_sentiment(news)
+                sentiment_confidence = 0.5
+                sentiment_source     = "keyword_fallback"
 
         # ------------------------------------------------------------------
         # 5. Volume signal — Fix 9: (current_vol − avg_vol_20) / avg_vol_20

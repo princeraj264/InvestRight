@@ -123,7 +123,16 @@ def update_weights_from_trades(trades: dict, learning_rate: float = 0.01) -> dic
         logger.warning("[WEIGHTS] No eligible trades found for weight update")
         return weights
 
-    for trade in eligible:
+    # Split into training (80%) and validation (20%) sets — temporal order preserved
+    split_idx = int(len(eligible) * 0.8)
+    train_set = eligible[:split_idx]
+    val_set   = eligible[split_idx:]
+
+    if not train_set:
+        logger.warning("[WEIGHTS] No training trades after split — skipping update")
+        return weights
+
+    for trade in train_set:
         fv     = trade["features_vector"]
         action = trade["action"]
         result = trade["result"]
@@ -149,24 +158,24 @@ def update_weights_from_trades(trades: dict, learning_rate: float = 0.01) -> dic
         for k, xk in x.items():
             weights[k] = weights.get(k, 0.0) + learning_rate * error * xk
 
-    if len(eligible) < 5:
-        # Insufficient data to validate — apply update without checking
+    if len(val_set) < 3:
+        # Insufficient held-out data to validate — apply update unconditionally
         save_weights(weights)
         logger.info(
-            f"[WEIGHTS] Updated from {len(eligible)} trades (lr={learning_rate}) "
-            "(skipped validation — insufficient trades)"
+            f"[WEIGHTS] Updated from {len(train_set)} train trades (lr={learning_rate}) "
+            "(skipped validation — insufficient held-out trades)"
         )
         return {**weights, "update_applied": True, "accuracy_before": None, "accuracy_after": None}
 
-    # Compute accuracy before and after on the eligible set
+    # Compute accuracy before and after on the held-out validation set
     try:
         current_weights = load_weights()
-        acc_before = _simulate_accuracy(current_weights, eligible)
-        acc_after  = _simulate_accuracy(weights, eligible)
+        acc_before = _simulate_accuracy(current_weights, val_set)
+        acc_after  = _simulate_accuracy(weights, val_set)
 
         if acc_after < acc_before - 0.05:
             logger.critical(
-                f"[WEIGHTS] Update rejected: new accuracy {acc_after:.3f} vs "
+                f"[WEIGHTS] Update rejected: validation accuracy {acc_after:.3f} vs "
                 f"current {acc_before:.3f} (delta={acc_after - acc_before:+.3f})"
             )
             return {
@@ -177,7 +186,8 @@ def update_weights_from_trades(trades: dict, learning_rate: float = 0.01) -> dic
             }
 
         logger.info(
-            f"[WEIGHTS] Update applied: accuracy {acc_before:.3f} → {acc_after:.3f}"
+            f"[WEIGHTS] Update applied: held-out accuracy {acc_before:.3f} → {acc_after:.3f} "
+            f"(train={len(train_set)}, val={len(val_set)})"
         )
     except Exception as _val_err:
         logger.warning(f"[WEIGHTS] Validation failed ({_val_err}) — applying update anyway")

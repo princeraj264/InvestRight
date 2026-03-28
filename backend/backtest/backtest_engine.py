@@ -97,7 +97,9 @@ def run_backtest(
             # No new entries while in a position (one trade at a time)
             # ------------------------------------------------------------------
             if position is not None:
-                equity_curve.append({"bar_index": i, "bar_time": bar_time, "equity": round(capital, 2)})
+                # Mark-to-market: include unrealised P&L of open position
+                mtm_equity = capital + _compute_pnl(position, bar_close)
+                equity_curve.append({"bar_index": i, "bar_time": bar_time, "equity": round(mtm_equity, 2)})
                 continue
 
             # ------------------------------------------------------------------
@@ -112,7 +114,7 @@ def run_backtest(
                 "news":   [],   # no live news feed in backtest
             }
 
-            analysis = analyze_data(data)
+            analysis = analyze_data(data, skip_llm_sentiment=True)
             pattern  = detect_pattern(data["ohlc"])
             decision = make_decision(
                 analysis,

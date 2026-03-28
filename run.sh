@@ -25,7 +25,7 @@ pip install -q -r "$BACKEND_DIR/requirements.txt"
 # 3. Initialise database (idempotent — safe to run every time)
 echo "[setup] Initialising database..."
 cd "$BACKEND_DIR"
-python init_db.py && echo "[setup] Database ready."
+python db/init_db.py && echo "[setup] Database ready."
 
 # 4. Start backend
 echo "[backend] Starting Flask API on port 5001..."

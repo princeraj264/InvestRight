@@ -86,6 +86,9 @@ def _db_writer_loop() -> None:
             _db_queue.task_done()
 
 
+_MAX_METADATA_CHARS = 4000   # guard against oversized JSONB inserts
+
+
 def _safe_metadata(metadata: Optional[dict]) -> Optional[dict]:
     """Ensure metadata is JSON-serialisable; convert problematic values to str."""
     if metadata is None:
@@ -97,6 +100,12 @@ def _safe_metadata(metadata: Optional[dict]) -> Optional[dict]:
             safe[k] = v
         except (TypeError, ValueError):
             safe[k] = str(v)
+    try:
+        serialized = json.dumps(safe)
+        if len(serialized) > _MAX_METADATA_CHARS:
+            return {"_truncated": True, "_original_size": len(serialized)}
+    except Exception:
+        return {"_error": "metadata_unserializable"}
     return safe
 
 

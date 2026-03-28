@@ -1,3 +1,4 @@
+import atexit
 import os
 from contextlib import contextmanager
 import psycopg2
@@ -24,6 +25,14 @@ def _get_pool():
         except Exception as e:
             logger.error(f"[DB] Failed to initialise connection pool: {e}")
             raise
+
+        def _close_pool():
+            if _pool is not None:
+                _pool.closeall()
+                logger.info("[DB] Connection pool closed on exit")
+
+        atexit.register(_close_pool)
+
     return _pool
 
 
