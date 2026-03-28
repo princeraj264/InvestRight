@@ -149,6 +149,85 @@ def update_weights_from_trades(trades: dict, learning_rate: float = 0.01) -> dic
         for k, xk in x.items():
             weights[k] = weights.get(k, 0.0) + learning_rate * error * xk
 
+    if len(eligible) < 5:
+        # Insufficient data to validate — apply update without checking
+        save_weights(weights)
+        logger.info(
+            f"[WEIGHTS] Updated from {len(eligible)} trades (lr={learning_rate}) "
+            "(skipped validation — insufficient trades)"
+        )
+        return {**weights, "update_applied": True, "accuracy_before": None, "accuracy_after": None}
+
+    # Compute accuracy before and after on the eligible set
+    try:
+        current_weights = load_weights()
+        acc_before = _simulate_accuracy(current_weights, eligible)
+        acc_after  = _simulate_accuracy(weights, eligible)
+
+        if acc_after < acc_before - 0.05:
+            logger.critical(
+                f"[WEIGHTS] Update rejected: new accuracy {acc_after:.3f} vs "
+                f"current {acc_before:.3f} (delta={acc_after - acc_before:+.3f})"
+            )
+            return {
+                **current_weights,
+                "update_applied":  False,
+                "accuracy_before": round(acc_before, 4),
+                "accuracy_after":  round(acc_after, 4),
+            }
+
+        logger.info(
+            f"[WEIGHTS] Update applied: accuracy {acc_before:.3f} → {acc_after:.3f}"
+        )
+    except Exception as _val_err:
+        logger.warning(f"[WEIGHTS] Validation failed ({_val_err}) — applying update anyway")
+        acc_before = None
+        acc_after  = None
+
     save_weights(weights)
     logger.info(f"[WEIGHTS] Updated from {len(eligible)} trades (lr={learning_rate})")
-    return weights
+    return {
+        **weights,
+        "update_applied":  True,
+        "accuracy_before": round(acc_before, 4) if acc_before is not None else None,
+        "accuracy_after":  round(acc_after, 4)  if acc_after  is not None else None,
+    }
+
+
+def _simulate_accuracy(weights: dict, eligible: list) -> float:
+    """
+    Compute directional accuracy of weights on the eligible trade set.
+    Predicts UP if p_up > 0.5, DOWN otherwise.
+    Returns fraction of correct predictions.
+    """
+    if not eligible:
+        return 0.0
+
+    correct = 0
+    for trade in eligible:
+        fv     = trade["features_vector"]
+        action = trade["action"]
+        result = trade["result"]
+
+        x = {
+            "w_bias":       1.0,
+            "w_trend":      fv.get("trend",             0.0),
+            "w_sentiment":  fv.get("sentiment",         0.0),
+            "w_pattern":    fv.get("pattern_direction", 0.0) * fv.get("pattern_confidence", 0.0),
+            "w_volatility": fv.get("volatility_norm",   0.0),
+            "w_sr_signal":  fv.get("sr_signal",         0.0),
+            "w_volume":     fv.get("volume_signal",      0.0),
+        }
+        z    = sum(weights.get(k, 0.0) * v for k, v in x.items())
+        p_up = _sigmoid(z)
+        predicted_up = p_up > 0.5
+
+        # Ground truth: did price go up?
+        actual_up = (
+            (action == "BUY"  and result == "correct") or
+            (action == "SELL" and result == "wrong")
+        )
+        if predicted_up == actual_up:
+            correct += 1
+
+    return correct / len(eligible)

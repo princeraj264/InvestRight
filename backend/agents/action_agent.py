@@ -1,6 +1,7 @@
 import os
 import uuid
 from datetime import datetime
+from typing import Optional
 from utils.logger import setup_logger
 from memory.memory_store import store_trade, update_trade_result
 from safety.idempotency import generate_key, is_duplicate, record_key
@@ -12,7 +13,7 @@ from portfolio.position_manager import open_position
 logger = setup_logger(__name__)
 
 
-def execute(decision: dict, symbol: str) -> dict:
+def execute(decision: dict, symbol: str, trace: Optional[object] = None) -> dict:
     """
     Execute a trading decision end-to-end:
     idempotency check → store trade → place order → poll fill.
@@ -28,6 +29,8 @@ def execute(decision: dict, symbol: str) -> dict:
     """
     if not symbol:
         raise ValueError("[ACTION] symbol must be provided to execute()")
+
+    trace_id = getattr(trace, "trace_id", None)
 
     try:
         action = decision.get("action")
@@ -46,6 +49,30 @@ def execute(decision: dict, symbol: str) -> dict:
                 f"[ACTION] Duplicate signal blocked: {symbol} {action} (key={idem_key})"
             )
             return _no_exec("Duplicate signal within 15-min window")
+
+        # ------------------------------------------------------------------
+        # LLM pre-execution review (fail-open)
+        # ------------------------------------------------------------------
+        try:
+            from llm.review_agent import review_decision
+            from utils.pattern_engine import detect_pattern
+            review = review_decision(
+                symbol=symbol,
+                decision=decision,
+                analysis=decision.get("_analysis", {}),
+                pattern=decision.get("_pattern", {}),
+                risk=decision,
+                trace_id=trace_id,
+            )
+            if not review.get("approved", True):
+                flags = review.get("flags", [])
+                reason_msg = flags[0] if flags else "Trade blocked by review agent"
+                logger.critical(
+                    f"[REVIEW] Trade blocked for {symbol}: {flags}"
+                )
+                return _no_exec(reason_msg)
+        except Exception as _review_err:
+            logger.warning(f"[ACTION] Review agent error (proceeding): {_review_err}")
 
         # ------------------------------------------------------------------
         # Persist trade record
@@ -69,6 +96,17 @@ def execute(decision: dict, symbol: str) -> dict:
         if not store_trade(trade_record):
             logger.error("[ACTION] Failed to store trade in DB")
             return _no_exec("Failed to store trade in DB")
+
+        # Record prediction for model monitoring
+        try:
+            from feedback.model_monitor import record_prediction
+            record_prediction(
+                trade_id=trade_id,
+                probability_up=float(decision.get("probability_up", 0.5)),
+                action=action,
+            )
+        except Exception:
+            pass  # never block execution for monitoring
 
         # Record idempotency key immediately after successful store
         if not record_key(idem_key, trade_id, symbol, action):

@@ -12,6 +12,7 @@ Fix 10 : Weights loaded from weights.json at call time; features_vector included
 """
 
 import math
+from typing import Optional
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -222,6 +223,7 @@ def make_decision(
     current_price: float = None,
     weights: dict = None,
     config: dict = None,
+    trace: Optional[object] = None,
 ) -> dict:
     """
     Probabilistic trading decision engine.
@@ -311,14 +313,35 @@ def make_decision(
             "volume_signal":      features["volume_signal"],
         }
 
+        # LLM explanation (non-blocking, falls back to technical reason)
+        trace_id = getattr(trace, "trace_id", None)
+        if action != "WAIT":
+            try:
+                from llm.explanation_agent import generate_explanation
+                human_reason = generate_explanation(
+                    symbol=getattr(trace, "symbol", ""),
+                    decision={
+                        "action": action, "probability_up": p_up, "reason": reason,
+                    },
+                    analysis=analysis,
+                    pattern=pattern,
+                    risk={},   # risk not available here; explanation_agent handles None gracefully
+                    trace_id=trace_id,
+                )
+            except Exception:
+                human_reason = reason
+        else:
+            human_reason = "No trade signal. Conditions do not meet entry criteria."
+
         return {
-            "action":          action,
-            "confidence":      confidence,
-            "expected_value":  ev_raw,
-            "probability_up":  p_up,
-            "risk":            risk,
-            "reason":          reason,
-            "features_vector": features_vector,
+            "action":           action,
+            "confidence":       confidence,
+            "expected_value":   ev_raw,
+            "probability_up":   p_up,
+            "risk":             risk,
+            "reason":           reason,
+            "human_reason":     human_reason,
+            "features_vector":  features_vector,
         }
 
     except Exception as e:
@@ -330,5 +353,6 @@ def make_decision(
             "probability_up":  0.5,
             "risk":            0.0,
             "reason":          f"Decision engine error: {str(e)}",
+            "human_reason":    "No trade signal. Conditions do not meet entry criteria.",
             "features_vector": {},
         }

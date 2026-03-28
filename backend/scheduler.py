@@ -17,6 +17,7 @@ load_dotenv()
 from main import run
 from portfolio.exit_monitor import run_exit_checks
 from portfolio.pnl_calculator import take_snapshot
+from safety.kill_switch import check_and_halt_if_degraded
 from utils.logger import setup_logger
 from config import Config
 
@@ -33,8 +34,23 @@ def exit_job():
     )
 
 
+def degradation_check_job():
+    """Check model health; activate kill switch if degraded."""
+    halted = check_and_halt_if_degraded()
+    if halted:
+        logger.critical(
+            "[SCHEDULER] Model degradation detected — trading halted. "
+            "Manual /resume required after investigation."
+        )
+
+
 def analysis_job(symbol):
     """Run the full analysis pipeline for a symbol."""
+    # Skip if kill switch is active (including auto-halt from degradation check)
+    from safety.kill_switch import is_trading_halted
+    if is_trading_halted():
+        logger.warning(f"[SCHEDULER] Kill switch active — skipping analysis for {symbol}")
+        return
     logger.info(f"[SCHEDULER] Starting analysis job for: {symbol}")
     result = run(symbol)
     logger.info(
@@ -54,6 +70,9 @@ def run_scheduler():
     """Set up and run the scheduler."""
     symbols = getattr(Config, 'SYMBOLS', ['RELIANCE.NS'])
 
+    # Degradation check — runs every 15 min, BEFORE analysis
+    schedule.every(15).minutes.do(degradation_check_job)
+
     # Exit monitor — runs every 15 min, BEFORE analysis
     schedule.every(15).minutes.do(exit_job)
 
@@ -67,6 +86,7 @@ def run_scheduler():
     logger.info("[SCHEDULER] Scheduled daily P&L snapshot at 15:30 IST")
 
     # Run once immediately at startup
+    degradation_check_job()
     exit_job()
     for symbol in symbols:
         analysis_job(symbol)

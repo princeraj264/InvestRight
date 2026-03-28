@@ -19,6 +19,7 @@ trade should be rejected regardless.
 
 import pandas as pd
 import numpy as np
+from typing import Optional
 from utils.logger import setup_logger
 from safety.capital_limits import check_limit, update_exposure
 
@@ -28,7 +29,7 @@ MAX_KELLY_FRACTION = 0.50   # Never risk more than 50% of capital
 MAX_LOSS_HARD_CAP  = 0.10   # Absolute hard cap: reject if stop implies >10% loss
 
 
-def apply_risk(decision: dict, analysis: dict, ohlc: pd.DataFrame, symbol: str = None) -> dict:
+def apply_risk(decision: dict, analysis: dict, ohlc: pd.DataFrame, symbol: str = None, trace: Optional[object] = None) -> dict:
     """
     Apply risk management to a proposed trading decision.
 

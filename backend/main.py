@@ -6,6 +6,12 @@ import threading
 from dotenv import load_dotenv
 load_dotenv()  # Must run before any module that reads env vars at import time
 from flask import Flask, request, jsonify
+from observability.trace import TraceContext, generate_trace_id
+from observability.audit_log import (
+    log_event, log_pipeline_start, log_pipeline_end,
+    DATA_FETCH, ANALYSIS_COMPLETE, PATTERN_DETECTED,
+    DECISION_MADE, RISK_APPLIED, ORDER_PLACED,
+)
 from agents.data_agent import fetch_and_package_data
 from agents.analysis_agent import analyze_data
 from utils.pattern_engine import detect_pattern
@@ -101,6 +107,20 @@ def health():
     except Exception:
         overall = "degraded"
 
+    # Model health check
+    try:
+        from feedback.model_monitor import compute_accuracy_window
+        mh = compute_accuracy_window(30)
+        status["model_health"] = {
+            "is_healthy":  mh["is_healthy"],
+            "accuracy":    mh["accuracy"],
+            "brier_score": mh["brier_score"],
+            "sample_size": mh["completed_trades"],
+        }
+    except Exception:
+        status["model_health"] = {"is_healthy": True, "accuracy": None,
+                                  "brier_score": None, "sample_size": 0}
+
     status["status"] = overall
     return jsonify(status)
 
@@ -152,26 +172,58 @@ def analyze():
                 "message": "Kill switch is active. Resume trading via POST /resume.",
             }), 503
 
-        logger.info(f"[API] Analysis request for symbol: {symbol}")
+        trace = TraceContext(generate_trace_id(), symbol)
+        log_pipeline_start(trace)
+        logger.info(f"[API] Analysis request for symbol: {symbol} trace={trace.trace_id}")
 
-        data = fetch_and_package_data(symbol)
+        data = fetch_and_package_data(symbol, trace=trace)
         if data is None:
             logger.error(f"[API] Failed to fetch data for {symbol}")
+            log_event(trace.trace_id, DATA_FETCH, "data_agent",
+                      f"Failed to fetch data for {symbol}", severity="ERROR", symbol=symbol)
             return jsonify({"error": "Failed to fetch data", "symbol": symbol}), 500
 
-        analysis      = analyze_data(data)
-        pattern       = detect_pattern(data["ohlc"])
+        log_event(trace.trace_id, DATA_FETCH, "data_agent",
+                  f"Data fetched for {symbol}", symbol=symbol,
+                  duration_ms=trace.elapsed_ms())
+
+        analysis = analyze_data(data, trace=trace)
+        log_event(trace.trace_id, ANALYSIS_COMPLETE, "analysis_agent",
+                  f"Analysis complete: trend={analysis.get('trend')} "
+                  f"sentiment={analysis.get('sentiment')}({analysis.get('sentiment_source')})",
+                  symbol=symbol)
+
+        pattern = detect_pattern(data["ohlc"], trace=trace)
+        log_event(trace.trace_id, PATTERN_DETECTED, "pattern_engine",
+                  f"Pattern: {pattern.get('pattern')} conf={pattern.get('confidence'):.2f}",
+                  symbol=symbol)
+
         current_price = (
             float(data["ohlc"]["close"].iloc[-1])
             if data.get("ohlc") is not None and not data["ohlc"].empty
             else None
         )
-        decision  = make_decision(analysis, pattern, current_price=current_price)
-        risk_adj  = apply_risk(decision, analysis, data["ohlc"], symbol=symbol)
-        execution = execute(risk_adj, symbol=symbol)
+        decision  = make_decision(analysis, pattern, current_price=current_price, trace=trace)
+        log_event(trace.trace_id, DECISION_MADE, "decision_agent",
+                  f"Decision: {decision.get('action')} p_up={decision.get('probability_up'):.3f}",
+                  symbol=symbol)
+
+        risk_adj  = apply_risk(decision, analysis, data["ohlc"], symbol=symbol, trace=trace)
+        log_event(trace.trace_id, RISK_APPLIED, "risk_engine",
+                  f"Risk: action={risk_adj.get('action')} entry={risk_adj.get('entry')}",
+                  symbol=symbol)
+
+        execution = execute(risk_adj, symbol=symbol, trace=trace)
+        log_event(trace.trace_id, ORDER_PLACED, "action_agent",
+                  f"Execution: executed={execution.get('executed')} "
+                  f"reason={execution.get('reason')}",
+                  symbol=symbol,
+                  trade_id=execution.get("trade_id"))
 
         response = _build_response(symbol, decision, risk_adj, analysis, pattern)
         response["execution"] = execution
+        response["trace_id"]  = trace.trace_id
+        log_pipeline_end(trace, response["decision"])
         logger.info(f"[API] Analysis completed for {symbol}: {response['decision']}")
         return jsonify(response)
 
@@ -489,6 +541,178 @@ def portfolio_pnl_daily():
     return jsonify(get_daily_pnl())
 
 
+@app.route("/portfolio/summary", methods=["GET"])
+@require_auth
+def portfolio_summary_llm():
+    """LLM-generated portfolio narrative summary."""
+    try:
+        from portfolio.pnl_calculator import get_portfolio_summary
+        from memory.memory_store import get_all_trades
+        from llm.summary_agent import generate_portfolio_summary
+
+        timeframe     = request.args.get("timeframe", "7d")
+        portfolio     = get_portfolio_summary()
+        all_trades    = get_all_trades()
+        trade_history = list(all_trades.values())
+
+        summary = generate_portfolio_summary(
+            portfolio_data=portfolio,
+            trade_history=trade_history,
+            timeframe=timeframe,
+        )
+        return jsonify({"summary": summary, "timeframe": timeframe})
+    except Exception as e:
+        logger.error(f"[API] /portfolio/summary error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/portfolio/daily-brief", methods=["GET"])
+@require_auth
+def portfolio_daily_brief():
+    """LLM-generated daily trading brief."""
+    try:
+        from datetime import date
+        from portfolio.pnl_calculator import get_daily_pnl
+        from portfolio.position_manager import get_open_positions
+        from llm.summary_agent import generate_daily_brief
+
+        today     = str(date.today())
+        daily_pnl = get_daily_pnl()
+        positions = get_open_positions()
+        brief     = generate_daily_brief(
+            date=today,
+            daily_pnl=daily_pnl,
+            open_positions=positions,
+        )
+        return jsonify({"brief": brief, "date": today})
+    except Exception as e:
+        logger.error(f"[API] /portfolio/daily-brief error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Observability endpoints
+# ---------------------------------------------------------------------------
+
+@app.route("/observability/trace/<trace_id>", methods=["GET"])
+@require_auth
+def observability_trace(trace_id):
+    """Return the full event sequence for a pipeline trace."""
+    try:
+        from db.connection import db_cursor
+        with db_cursor() as cur:
+            cur.execute(
+                """
+                SELECT component, event_type, message, duration_ms,
+                       severity, metadata, created_at
+                FROM audit_log
+                WHERE trace_id = %s::uuid
+                ORDER BY created_at ASC
+                """,
+                (trace_id,),
+            )
+            rows = cur.fetchall()
+            cols = ["component", "event_type", "message", "duration_ms",
+                    "severity", "metadata", "created_at"]
+
+        events = []
+        total_ms = 0
+        final_action = None
+        for row in rows:
+            d = dict(zip(cols, row))
+            if d.get("created_at"):
+                d["created_at"] = d["created_at"].isoformat()
+            if d.get("duration_ms"):
+                total_ms += d["duration_ms"]
+            if d.get("event_type") == "pipeline_end":
+                meta = d.get("metadata") or {}
+                final_action = meta.get("final_action")
+            events.append(d)
+
+        return jsonify({
+            "trace_id":          trace_id,
+            "events":            events,
+            "total_duration_ms": total_ms,
+            "final_action":      final_action,
+        })
+    except Exception as e:
+        logger.error(f"[API] /observability/trace error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/observability/metrics", methods=["GET"])
+@require_auth
+def observability_metrics():
+    """Return per-component latency and success-rate stats."""
+    from observability.metrics import get_all_stats
+    last_n = int(request.args.get("minutes", 60))
+    stats  = get_all_stats(last_n_minutes=last_n)
+    return jsonify({"components": stats, "period_minutes": last_n})
+
+
+@app.route("/observability/audit", methods=["GET"])
+@require_auth
+def observability_audit():
+    """
+    Query the audit log.
+
+    Query params: symbol, severity, event_type, since (ISO), limit (default 100, max 500)
+    """
+    try:
+        from db.connection import db_cursor
+        symbol     = request.args.get("symbol")
+        severity   = request.args.get("severity")
+        event_type = request.args.get("event_type")
+        since      = request.args.get("since", "now() - interval '24 hours'")
+        limit      = min(int(request.args.get("limit", 100)), 500)
+
+        conditions = ["created_at >= %s"]
+        params     = [since]
+
+        if symbol:
+            conditions.append("symbol = %s")
+            params.append(symbol)
+        if severity:
+            conditions.append("severity = %s")
+            params.append(severity.upper())
+        if event_type:
+            conditions.append("event_type = %s")
+            params.append(event_type)
+
+        params.append(limit)
+        where = " AND ".join(conditions)
+
+        with db_cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT log_id, trace_id, event_type, component, symbol,
+                       severity, message, duration_ms, created_at
+                FROM audit_log
+                WHERE {where}
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                params,
+            )
+            rows = cur.fetchall()
+            col_names = [d[0] for d in cur.description]
+
+        events = []
+        for row in rows:
+            d = dict(zip(col_names, row))
+            for k, v in d.items():
+                if hasattr(v, "isoformat"):
+                    d[k] = v.isoformat()
+                elif hasattr(v, "__str__") and type(v).__name__ == "UUID":
+                    d[k] = str(v)
+            events.append(d)
+
+        return jsonify({"events": events, "total": len(events), "limit": limit})
+    except Exception as e:
+        logger.error(f"[API] /observability/audit error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 # ---------------------------------------------------------------------------
 # Backtest endpoints
 # ---------------------------------------------------------------------------
@@ -691,28 +915,32 @@ def run(symbol: str) -> dict:
     """
     try:
         logger.info(f"[PIPELINE] Running pipeline for: {symbol}")
+        trace = TraceContext(generate_trace_id(), symbol)
+        log_pipeline_start(trace)
 
         if is_trading_halted():
             logger.warning(f"[PIPELINE] Trading halted — skipping pipeline for {symbol}")
-            return {"error": "Trading halted", "symbol": symbol}
+            return {"error": "Trading halted", "symbol": symbol, "trace_id": trace.trace_id}
 
-        data = fetch_and_package_data(symbol)
+        data = fetch_and_package_data(symbol, trace=trace)
         if data is None:
             logger.error(f"[PIPELINE] Failed to fetch data for {symbol}")
-            return {"error": f"Failed to fetch data for {symbol}"}
+            return {"error": f"Failed to fetch data for {symbol}", "trace_id": trace.trace_id}
 
-        analysis      = analyze_data(data)
-        pattern       = detect_pattern(data["ohlc"])
+        analysis      = analyze_data(data, trace=trace)
+        pattern       = detect_pattern(data["ohlc"], trace=trace)
         current_price = (
             float(data["ohlc"]["close"].iloc[-1])
             if data.get("ohlc") is not None and not data["ohlc"].empty
             else None
         )
-        decision  = make_decision(analysis, pattern, current_price=current_price)
-        risk_adj  = apply_risk(decision, analysis, data["ohlc"], symbol=symbol)
-        execution = execute(risk_adj, symbol=symbol)
+        decision  = make_decision(analysis, pattern, current_price=current_price, trace=trace)
+        risk_adj  = apply_risk(decision, analysis, data["ohlc"], symbol=symbol, trace=trace)
+        execution = execute(risk_adj, symbol=symbol, trace=trace)
         result    = _build_response(symbol, decision, risk_adj, analysis, pattern)
         result["execution"] = execution
+        result["trace_id"]  = trace.trace_id
+        log_pipeline_end(trace, result["decision"])
 
         logger.info(f"[PIPELINE] Completed for {symbol}: {result['decision']}")
         return result

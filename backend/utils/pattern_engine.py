@@ -11,6 +11,7 @@ returns the one with the highest confidence.
 
 import pandas as pd
 import numpy as np
+from typing import Optional
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -19,7 +20,7 @@ logger = setup_logger(__name__)
 _CONFIDENCE_FLOOR = 0.5
 
 
-def detect_pattern(ohlc: pd.DataFrame) -> dict:
+def detect_pattern(ohlc: pd.DataFrame, trace: Optional[object] = None) -> dict:
     """
     Detect chart patterns (geometric + momentum) from OHLCV data.
 

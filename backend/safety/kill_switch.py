@@ -36,6 +36,32 @@ def activate_kill_switch(reason: str, activated_by: str) -> bool:
         return False
 
 
+def check_and_halt_if_degraded() -> bool:
+    """
+    Check model health and activate kill switch if model has degraded.
+
+    Returns:
+        True if kill switch was activated (trading halted).
+        False if model is healthy (or insufficient data to judge).
+    """
+    try:
+        from feedback.model_monitor import is_model_healthy
+        if not is_model_healthy():
+            logger.critical(
+                "[SAFETY] Auto-halt triggered: model accuracy below threshold"
+            )
+            activated = activate_kill_switch(
+                reason="Model accuracy below threshold — auto-halted",
+                activated_by="model_monitor",
+            )
+            if activated:
+                logger.critical("[SAFETY] Kill switch ACTIVATED by model monitor")
+                return True
+    except Exception as e:
+        logger.warning(f"[KILL_SWITCH] check_and_halt_if_degraded error: {e}")
+    return False
+
+
 def deactivate_kill_switch() -> bool:
     try:
         with db_cursor() as cur:

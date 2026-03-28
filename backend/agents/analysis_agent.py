@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from utils.logger import setup_logger
+from typing import Optional
 
 logger = setup_logger(__name__)
 
@@ -29,7 +30,7 @@ _NEGATIVE_WORDS = {
 _SENTIMENT_THRESHOLD = 0.05   # was 0.1 — easier for real headlines to cross
 
 
-def analyze_data(data: dict) -> dict:
+def analyze_data(data: dict, trace: Optional[object] = None) -> dict:
     """
     Extract structured signals from raw data.
 
@@ -108,9 +109,21 @@ def analyze_data(data: dict) -> dict:
         volatility = float(atr.iloc[-1]) if not pd.isna(atr.iloc[-1]) else float(close.std())
 
         # ------------------------------------------------------------------
-        # 4. Sentiment — Fix 2: weighted keywords, lower threshold
+        # 4. Sentiment — LLM-powered with keyword fallback
         # ------------------------------------------------------------------
-        sentiment = _compute_sentiment(news)
+        symbol     = data.get("symbol", "")
+        trace_id   = getattr(trace, "trace_id", None)
+        try:
+            from llm.sentiment_agent import classify_sentiment_with_score
+            sent_result = classify_sentiment_with_score(news, symbol, trace_id)
+            sentiment            = sent_result["sentiment"]
+            sentiment_confidence = sent_result["confidence"]
+            sentiment_source     = sent_result["source"]
+        except Exception as _sent_err:
+            logger.warning(f"[ANALYSIS] LLM sentiment unavailable: {_sent_err} — using keyword fallback")
+            sentiment            = _compute_sentiment(news)
+            sentiment_confidence = 0.5
+            sentiment_source     = "keyword_fallback"
 
         # ------------------------------------------------------------------
         # 5. Volume signal — Fix 9: (current_vol − avg_vol_20) / avg_vol_20
@@ -122,12 +135,14 @@ def analyze_data(data: dict) -> dict:
         volume_signal = _compute_volume_signal(vol_series)
 
         result = {
-            "trend":         trend,
-            "support":       support_levels,
-            "resistance":    resistance_levels,
-            "volatility":    volatility,
-            "sentiment":     sentiment,
-            "volume_signal": volume_signal,
+            "trend":                trend,
+            "support":              support_levels,
+            "resistance":           resistance_levels,
+            "volatility":           volatility,
+            "sentiment":            sentiment,
+            "sentiment_confidence": sentiment_confidence,
+            "sentiment_source":     sentiment_source,
+            "volume_signal":        volume_signal,
         }
 
         logger.info(
@@ -191,10 +206,12 @@ def _compute_volume_signal(vol_series) -> float:
 
 def _safe_analysis_default() -> dict:
     return {
-        "trend":         "downtrend",
-        "support":       [],
-        "resistance":    [],
-        "volatility":    0.0,
-        "sentiment":     "neutral",
-        "volume_signal": 0.0,
+        "trend":                "downtrend",
+        "support":              [],
+        "resistance":           [],
+        "volatility":           0.0,
+        "sentiment":            "neutral",
+        "sentiment_confidence": 0.5,
+        "sentiment_source":     "keyword_fallback",
+        "volume_signal":        0.0,
     }

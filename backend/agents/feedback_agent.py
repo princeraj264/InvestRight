@@ -147,6 +147,11 @@ def record_outcome(trade_id: str, exit_price: float, exit_reason: str) -> dict:
         if result in ("correct", "wrong"):
             update_trade_result(trade_id, result)
             logger.info(f"[FEEDBACK] Trade {trade_id} outcome recorded: {result} (exit={exit_reason})")
+            try:
+                from feedback.model_monitor import record_outcome as _mo_record
+                _mo_record(trade_id, result)
+            except Exception:
+                pass
 
         return {
             "trade_id": trade_id,

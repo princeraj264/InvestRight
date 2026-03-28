@@ -222,3 +222,73 @@ CREATE TABLE IF NOT EXISTS backtest_equity_curve (
 );
 
 CREATE INDEX IF NOT EXISTS idx_bt_equity_run_id ON backtest_equity_curve(run_id);
+
+-- Observability tables
+
+-- Structured audit log — every pipeline event
+CREATE TABLE IF NOT EXISTS audit_log (
+    log_id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    trace_id        UUID NOT NULL,
+    span_id         UUID NOT NULL DEFAULT gen_random_uuid(),
+    event_type      VARCHAR(50) NOT NULL,
+    component       VARCHAR(50) NOT NULL,
+    symbol          VARCHAR(20),
+    trade_id        UUID,
+    severity        VARCHAR(10) NOT NULL DEFAULT 'INFO'
+                    CHECK (severity IN (
+                        'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'
+                    )),
+    message         TEXT NOT NULL,
+    metadata        JSONB,
+    duration_ms     INTEGER,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_trace_id   ON audit_log(trace_id);
+CREATE INDEX IF NOT EXISTS idx_audit_event_type ON audit_log(event_type);
+CREATE INDEX IF NOT EXISTS idx_audit_symbol     ON audit_log(symbol);
+CREATE INDEX IF NOT EXISTS idx_audit_created_at ON audit_log(created_at);
+
+-- Pipeline latency metrics per component
+CREATE TABLE IF NOT EXISTS pipeline_metrics (
+    metric_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    trace_id        UUID NOT NULL,
+    component       VARCHAR(50) NOT NULL,
+    symbol          VARCHAR(20),
+    duration_ms     INTEGER NOT NULL,
+    status          VARCHAR(10) NOT NULL
+                    CHECK (status IN ('success', 'failure')),
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_metrics_component ON pipeline_metrics(component);
+
+-- Model performance tracking
+CREATE TABLE IF NOT EXISTS model_performance (
+    id                  SERIAL PRIMARY KEY,
+    window_start        TIMESTAMPTZ NOT NULL,
+    window_end          TIMESTAMPTZ NOT NULL,
+    total_predictions   INTEGER NOT NULL DEFAULT 0,
+    correct_predictions INTEGER NOT NULL DEFAULT 0,
+    accuracy            NUMERIC(6, 4),
+    brier_score         NUMERIC(8, 6),
+    avg_confidence      NUMERIC(6, 4),
+    calibration_error   NUMERIC(8, 6),
+    weights_snapshot    JSONB,
+    created_at          TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- LLM call log — track every Anthropic API call
+CREATE TABLE IF NOT EXISTS llm_calls (
+    call_id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    trace_id          UUID,
+    agent             VARCHAR(50) NOT NULL,
+    model             VARCHAR(50) NOT NULL,
+    prompt_tokens     INTEGER,
+    completion_tokens INTEGER,
+    latency_ms        INTEGER,
+    status            VARCHAR(10) NOT NULL
+                      CHECK (status IN ('success', 'failure')),
+    fallback_used     BOOLEAN DEFAULT FALSE,
+    created_at        TIMESTAMPTZ DEFAULT NOW()
+);

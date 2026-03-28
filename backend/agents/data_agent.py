@@ -1,11 +1,12 @@
 from services.stock_service import fetch_stock_data_reliable
 from services.news_service import fetch_news_with_retry
 from utils.logger import setup_logger
+from typing import Optional
 import pandas as pd
 
 logger = setup_logger(__name__)
 
-def fetch_and_package_data(symbol: str) -> dict:
+def fetch_and_package_data(symbol: str, trace: Optional[object] = None) -> dict:
     """
     Fetch and package data for the AI system pipeline.
     
