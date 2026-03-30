@@ -135,7 +135,7 @@ def log_event(
         duration_ms: Component execution time in milliseconds.
     """
     _ensure_worker()
-    effective_trace = trace_id or "no-trace"
+    effective_trace = trace_id or str(uuid.uuid4())
     safe_meta = _safe_metadata(metadata)
 
     # --- Synchronous stdout write ---

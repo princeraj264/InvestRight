@@ -30,7 +30,26 @@ def initialise() -> bool:
                 )
                 logger.info(f"[CAPITAL_ACCOUNT] Seeded with ₹{total:,.2f}")
             else:
-                logger.info("[CAPITAL_ACCOUNT] Already initialised — skipping seed")
+                # If no capital has been deployed and no trades closed, allow
+                # TOTAL_CAPITAL changes in .env to take effect.
+                cur.execute(
+                    "SELECT total_capital, deployed_capital, realised_pnl FROM capital_account"
+                )
+                row = cur.fetchone()
+                stored_total = float(row[0])
+                deployed = float(row[1])
+                realised = float(row[2])
+                if stored_total != total and deployed == 0.0 and realised == 0.0:
+                    cur.execute(
+                        """
+                        UPDATE capital_account
+                        SET total_capital=%s, available_capital=%s, updated_at=NOW()
+                        """,
+                        (total, total),
+                    )
+                    logger.info(f"[CAPITAL_ACCOUNT] Updated to ₹{total:,.2f} (no trades yet)")
+                else:
+                    logger.info("[CAPITAL_ACCOUNT] Already initialised — skipping seed")
         return True
     except Exception as e:
         logger.error(f"[CAPITAL_ACCOUNT] Initialisation failed: {e}")

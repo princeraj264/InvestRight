@@ -122,6 +122,15 @@ CREATE TABLE IF NOT EXISTS capital_account (
     realised_pnl        NUMERIC(15, 2) NOT NULL DEFAULT 0.00,
     updated_at          TIMESTAMPTZ DEFAULT NOW()
 );
+-- Remove duplicate capital_account rows (keep the latest) before enforcing uniqueness.
+-- Safe to run on a clean DB (no rows to delete) or when only one row exists.
+DO $$
+BEGIN
+    DELETE FROM capital_account
+    WHERE id NOT IN (
+        SELECT id FROM capital_account ORDER BY id DESC LIMIT 1
+    );
+END $$;
 -- Enforce single-row invariant: unique index on a constant expression.
 -- This will fail loudly if a second row is ever inserted accidentally.
 CREATE UNIQUE INDEX IF NOT EXISTS capital_account_single_row ON capital_account ((1));

@@ -58,10 +58,10 @@ def get_portfolio_summary() -> dict:
 
         return {
             "capital": {
-                "total":      total_capital,
-                "deployed":   acct["deployed_capital"],
-                "available":  acct["available_capital"],
-                "return_pct": round(total_pnl / total_capital * 100, 4) if total_capital else 0.0,
+                "total_capital":     total_capital,
+                "deployed_capital":  acct["deployed_capital"],
+                "available_capital": acct["available_capital"],
+                "return_pct":        round(total_pnl / total_capital * 100, 4) if total_capital else 0.0,
             },
             "pnl": {
                 "unrealised": round(unrealised, 2),
@@ -85,7 +85,7 @@ def get_portfolio_summary() -> dict:
     except Exception as e:
         logger.error(f"[PNL] get_portfolio_summary failed: {e}")
         return {
-            "capital":   {"total": 0.0, "deployed": 0.0, "available": 0.0, "return_pct": 0.0},
+            "capital":   {"total_capital": 0.0, "deployed_capital": 0.0, "available_capital": 0.0, "return_pct": 0.0},
             "pnl":       {"unrealised": 0.0, "realised": 0.0, "total": 0.0, "total_pct": 0.0},
             "positions": {"open": 0, "closed": 0, "total": 0},
             "trades":    {"wins": 0, "losses": 0, "pending": 0, "win_rate": 0.0},
@@ -230,9 +230,9 @@ def take_snapshot() -> bool:
                 """,
                 (
                     today,
-                    summary["capital"]["total"],
-                    summary["capital"]["deployed"],
-                    summary["capital"]["available"],
+                    summary["capital"]["total_capital"],
+                    summary["capital"]["deployed_capital"],
+                    summary["capital"]["available_capital"],
                     summary["pnl"]["unrealised"],
                     summary["pnl"]["realised"],
                     summary["positions"]["open"],

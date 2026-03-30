@@ -164,20 +164,20 @@ def run_scheduler():
     from config import validate_required_env
     validate_required_env()
 
-    # Degradation check — runs every 15 min, BEFORE analysis
-    schedule.every(15).minutes.do(degradation_check_job)
+    # Degradation check — runs every 5 min, BEFORE analysis
+    schedule.every(5).minutes.do(degradation_check_job)
 
-    # Exit monitor — runs every 15 min, BEFORE analysis
-    schedule.every(15).minutes.do(exit_job)
+    # Exit monitor — runs every 5 min, BEFORE analysis
+    schedule.every(5).minutes.do(exit_job)
 
     # Analysis pipeline — reads watchlist from DB each time, so adding/removing
     # symbols via the dashboard takes effect on the next cycle without a restart
-    schedule.every(15).minutes.do(watchlist_analysis_job)
-    logger.info("[SCHEDULER] Scheduled watchlist analysis every 15 minutes (dynamic)")
+    schedule.every(5).minutes.do(watchlist_analysis_job)
+    logger.info("[SCHEDULER] Scheduled watchlist analysis every 5 minutes (dynamic)")
 
-    # Pending trade evaluation — every 15 min during market hours
-    schedule.every(15).minutes.do(pending_trade_evaluation_job)
-    logger.info("[SCHEDULER] Scheduled pending trade evaluation every 15 minutes")
+    # Pending trade evaluation — every 5 min during market hours
+    schedule.every(5).minutes.do(pending_trade_evaluation_job)
+    logger.info("[SCHEDULER] Scheduled pending trade evaluation every 5 minutes")
 
     # Daily P&L snapshot at market close (15:30 IST)
     schedule.every().day.at("15:30").do(snapshot_job)

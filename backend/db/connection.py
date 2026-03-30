@@ -1,5 +1,6 @@
 import atexit
 import os
+import threading
 from contextlib import contextmanager
 import psycopg2
 from psycopg2 import pool
@@ -8,11 +9,16 @@ from utils.logger import setup_logger
 logger = setup_logger(__name__)
 
 _pool = None
+_pool_lock = threading.Lock()
 
 
 def _get_pool():
     global _pool
-    if _pool is None:
+    if _pool is not None:
+        return _pool
+    with _pool_lock:
+        if _pool is not None:
+            return _pool
         dsn = os.getenv("DATABASE_URL")
         if not dsn:
             raise EnvironmentError(

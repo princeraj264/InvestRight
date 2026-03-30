@@ -32,19 +32,25 @@ echo "[backend] Starting Flask API on port 5001..."
 python main.py &
 BACKEND_PID=$!
 
-# 5. Start frontend static server
+# 5. Start scheduler (trading pipeline — runs every 15 min during market hours)
+echo "[scheduler] Starting trading scheduler..."
+python scheduler.py &
+SCHEDULER_PID=$!
+
+# 6. Start frontend static server
 echo "[frontend] Serving SPA on http://localhost:8080"
 cd "$FRONTEND_DIR"
 python -m http.server 8080 &
 FRONTEND_PID=$!
 
 echo ""
-echo "  Backend  → http://localhost:5001"
-echo "  Frontend → http://localhost:8080"
+echo "  Backend   → http://localhost:5001"
+echo "  Scheduler → running (every 5 min during market hours)"
+echo "  Frontend  → http://localhost:8080"
 echo ""
 echo "Press Ctrl+C to stop all services."
 
 # Cleanup on exit
-trap "echo ''; echo 'Shutting down...'; kill $BACKEND_PID $FRONTEND_PID 2>/dev/null; exit 0" INT TERM
+trap "echo ''; echo 'Shutting down...'; kill $BACKEND_PID $SCHEDULER_PID $FRONTEND_PID 2>/dev/null; exit 0" INT TERM
 
 wait

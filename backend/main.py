@@ -1014,7 +1014,9 @@ def observability_audit():
         symbol     = request.args.get("symbol")
         severity   = request.args.get("severity")
         event_type = request.args.get("event_type")
-        since      = request.args.get("since", "now() - interval '24 hours'")
+        from datetime import datetime, timezone, timedelta
+        since_raw  = request.args.get("since")
+        since      = since_raw if since_raw else (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
         limit      = min(int(request.args.get("limit", 100)), 500)
 
         conditions = ["created_at >= %s"]

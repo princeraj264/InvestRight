@@ -26,7 +26,7 @@ def fetch_and_package_data(symbol: str, trace: Optional[object] = None) -> dict:
         logger.info(f"[DATA_AGENT] Fetching data for {symbol}")
         
         # Fetch stock data
-        ohlc_df = fetch_stock_data_reliable(symbol, interval="1h", period="1mo")
+        ohlc_df = fetch_stock_data_reliable(symbol, interval="5m", period="5d")
         
         if ohlc_df is None or ohlc_df.empty:
             logger.error(f"[DATA_AGENT] Failed to fetch stock data for {symbol} — symbol may be invalid or delisted")
@@ -47,8 +47,8 @@ def fetch_and_package_data(symbol: str, trace: Optional[object] = None) -> dict:
         # Package the data
         packaged_data = {
             "symbol": symbol,
-            "ohlc": ohlc_df[['open', 'high', 'low', 'close']],  # OHLC only
-            "volume": ohlc_df['volume'],  # Volume series
+            "ohlc": ohlc_df[['open', 'high', 'low', 'close', 'volume']],
+            "volume": ohlc_df['volume'],
             "news": news_list
         }
         
